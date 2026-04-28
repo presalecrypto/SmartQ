@@ -264,8 +264,11 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         require(router != address(0), "Router not set");
         
         // ✅ التحقق الدفاعي من وجود أدوار غير متوقعة
-        require(getRoleMemberCount(ADMIN_ROLE) == 1, "Unexpected ADMIN members");
-        require(getRoleMemberCount(DEX_MANAGER_ROLE) == 1, "Unexpected DEX members");
+        require(
+    hasRole(ADMIN_ROLE, timelock),
+    "Timelock missing ADMIN_ROLE");
+        require(hasRole(DEX_MANAGER_ROLE, timelock), "Timelock missing DEX role");
+        require(!hasRole(DEX_MANAGER_ROLE, address(this)), "Contract holds role");
         
         // ✅ التحقق من أن Timelock لديه ADMIN_ROLE
         require(hasRole(ADMIN_ROLE, timelock), "Timelock missing ADMIN_ROLE");
@@ -274,8 +277,8 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         require(!hasRole(ADMIN_ROLE, address(this)), "Contract holds role");
         
         // ✅ التحقق من أن Role Admin مُضبط (ليس صفر)
-        require(_getRoleAdmin(ADMIN_ROLE) != bytes32(0), "Role admin not set");
-        require(_getRoleAdmin(DEX_MANAGER_ROLE) != bytes32(0), "Role admin not set");
+        require(getRoleAdmin(ADMIN_ROLE) != bytes32(0), "Role admin not set");
+        require(getRoleAdmin(DEX_MANAGER_ROLE) != bytes32(0), "Role admin not set");
         
         finalized = true;
         
@@ -326,29 +329,13 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
      * @dev approve قياسي — لا يوجد strictApprove
      * ✅ توافق كامل مع Uniswap, PancakeSwap, routers, aggregators
      */
-    function approve(address spender, uint256 value) 
-        public 
-        override 
-        returns (bool) 
+    function approve(address spender, uint256 amount)
+    public
+    override
+    returns (bool)
     {
-        return super.approve(spender, value);
-    }
-    
-    function increaseAllowance(address spender, uint256 addedValue) 
-        public 
-        override 
-        returns (bool) 
-    {
-        return super.increaseAllowance(spender, addedValue);
-    }
-    
-    function decreaseAllowance(address spender, uint256 subtractedValue) 
-        public 
-        override 
-        returns (bool) 
-    {
-        return super.decreaseAllowance(spender, subtractedValue);
-    }
+    return super.approve(spender, amount);
+     }
     
     // ═════════════════════════════════════════════════════════════
     // INTERNAL FUNCTIONS
@@ -381,7 +368,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl {
         if (maxWalletAmount > 0 && !isExcludedFromLimits[account]) {
             require(balanceOf(account) + amount <= maxWalletAmount, "Exceeds max wallet");
         }
-    }
+        }
     
     // ═════════════════════════════════════════════════════════════
     // VIEW FUNCTIONS

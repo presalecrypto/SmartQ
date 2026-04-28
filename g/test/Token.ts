@@ -1,14 +1,11 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { time } from "@nomicfoundation/hardhat-network-helpers";
-import { ProjectToken, TimelockController } from "../typechain-types";
+import { ProjectToken } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("ProjectToken v7 — Trust-Minimized", function () {
   let token: ProjectToken;
-  let timelock: TimelockController;
   let owner: SignerWithAddress;
-  let timelockSigner: SignerWithAddress;
   let user1: SignerWithAddress;
   let user2: SignerWithAddress;
   let pair: SignerWithAddress;
@@ -16,41 +13,21 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
   let attacker: SignerWithAddress;
 
   const MAX_SUPPLY = ethers.parseEther("1000000000");
-  const ONE_DAY = 86400;
-  const TWO_DAYS = 2 * ONE_DAY;
 
   beforeEach(async function () {
     [owner, user1, user2, pair, router, attacker] = await ethers.getSigners();
 
-    // Deploy TimelockController
-    const TimelockFactory = await ethers.getContractFactory("TimelockController");
-    timelock = await TimelockFactory.deploy(
-      TWO_DAYS,
-      [owner.address],
-      [owner.address],
-      owner.address
-    );
-    await timelock.waitForDeployment();
-
-    // Get timelock signer
-    timelockSigner = await ethers.getImpersonatedSigner(await timelock.getAddress());
-    await owner.sendTransaction({ to: timelockSigner.address, value: ethers.parseEther("1") });
-
-    // Deploy Token
+    // Deploy Token with owner as timelock (for testing simplicity)
     const TokenFactory = await ethers.getContractFactory("ProjectToken");
     token = await TokenFactory.deploy(
       "MyToken",
       "MTK",
-      await timelock.getAddress(),
+      owner.address,  // owner acts as timelock in tests
       [user1.address, user2.address],
       [ethers.parseEther("600000000"), ethers.parseEther("400000000")]
     );
     await token.waitForDeployment();
   });
-
-  // ═════════════════════════════════════════════════════════════
-  // DEPLOYMENT TESTS
-  // ═════════════════════════════════════════════════════════════
 
   describe("Deployment", function () {
     it("Should mint max supply in constructor", async function () {
@@ -59,7 +36,7 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
 
     it("Should store timelock address", async function () {
-      expect(await token.timelock()).to.equal(await timelock.getAddress());
+      expect(await token.timelock()).to.equal(owner.address);
     });
 
     it("Should distribute tokens correctly", async function () {
@@ -78,19 +55,13 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
 
     it("Should exclude timelock from limits", async function () {
-      expect(await token.isExcludedFromLimits(await timelock.getAddress())).to.be.true;
-    });
-
-    it("Should emit TimelockSet event", async function () {
-      const tx = await token.deploymentTransaction();
-      const receipt = await tx?.wait();
-      // Event emitted in constructor
+      expect(await token.isExcludedFromLimits(owner.address)).to.be.true;
     });
 
     it("Should revert with empty distribution", async function () {
       const TokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
-        TokenFactory.deploy("T", "T", await timelock.getAddress(), [], [])
+        TokenFactory.deploy("T", "T", owner.address, [], [])
       ).to.be.revertedWith("Empty distribution");
     });
 
@@ -99,7 +70,7 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
       const recipients = Array(201).fill(user1.address);
       const amounts = Array(201).fill(ethers.parseEther("1"));
       await expect(
-        TokenFactory.deploy("T", "T", await timelock.getAddress(), recipients, amounts)
+        TokenFactory.deploy("T", "T", owner.address, recipients, amounts)
       ).to.be.revertedWith("Too many recipients");
     });
 
@@ -107,22 +78,18 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
       const TokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
         TokenFactory.deploy(
-          "T", "T", await timelock.getAddress(),
+          "T", "T", owner.address,
           [user1.address], [ethers.parseEther("1")]
         )
       ).to.be.revertedWith("Must mint max supply");
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // ACCESS CONTROL TESTS
-  // ═════════════════════════════════════════════════════════════
-
   describe("Access Control", function () {
-    it("Should grant roles to timelock only", async function () {
-      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), await timelock.getAddress())).to.be.true;
-      expect(await token.hasRole(await token.ADMIN_ROLE(), await timelock.getAddress())).to.be.true;
-      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), await timelock.getAddress())).to.be.true;
+    it("Should grant roles to timelock (owner)", async function () {
+      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), owner.address)).to.be.true;
+      expect(await token.hasRole(await token.ADMIN_ROLE(), owner.address)).to.be.true;
+      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), owner.address)).to.be.true;
     });
 
     it("Should not allow non-timelock to grant roles", async function () {
@@ -133,35 +100,19 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
 
     it("Should not allow non-timelock to revoke roles", async function () {
       await expect(
-        token.connect(attacker).revokeRole(await token.ADMIN_ROLE(), await timelock.getAddress())
+        token.connect(attacker).revokeRole(await token.ADMIN_ROLE(), owner.address)
       ).to.be.revertedWith("Only timelock with role admin can revoke");
     });
 
     it("Should not allow non-timelock to renounce roles", async function () {
       await expect(
-        token.connect(attacker).renounceRole(await token.ADMIN_ROLE(), await timelock.getAddress())
+        token.connect(attacker).renounceRole(await token.ADMIN_ROLE(), owner.address)
       ).to.be.revertedWith("Only timelock can renounce roles");
-    });
-
-    it("Should allow timelock to grant roles before finalize", async function () {
-      // Simulate timelock calling grantRole
-      await owner.sendTransaction({
-        to: await timelock.getAddress(),
-        value: ethers.parseEther("0.1"),
-      });
-      
-      // We can't directly test timelock execution here, but we verify the logic
-      expect(await token.hasRole(await token.ADMIN_ROLE(), await timelock.getAddress())).to.be.true;
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // DEX SETUP TESTS
-  // ═════════════════════════════════════════════════════════════
-
   describe("DEX Setup", function () {
-    it("Should setup DEX via timelock", async function () {
-      // Simulate timelock execution
+    it("Should setup DEX via admin", async function () {
       await token.connect(owner).setupDEX(pair.address, router.address);
       
       expect(await token.pair()).to.equal(pair.address);
@@ -204,10 +155,6 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // MAX WALLET TESTS
-  // ═════════════════════════════════════════════════════════════
-
   describe("Max Wallet", function () {
     it("Should enforce maxWallet before finalize", async function () {
       await expect(
@@ -222,7 +169,6 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
 
     it("Should exclude pair from maxWallet (null safety)", async function () {
-      // Before DEX setup — pair is address(0), should not revert
       await expect(
         token.connect(user1).transfer(user2.address, ethers.parseEther("1"))
       ).to.not.be.reverted;
@@ -231,7 +177,6 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     it("Should exclude pair from maxWallet after setup", async function () {
       await token.connect(owner).setupDEX(pair.address, router.address);
       
-      // Transfer to pair should not check maxWallet
       await expect(
         token.connect(user1).transfer(pair.address, ethers.parseEther("500000000"))
       ).to.not.be.reverted;
@@ -244,16 +189,11 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
       expect(await token.maxWalletDisabled()).to.be.true;
       expect(await token.maxWalletAmount()).to.equal(0);
       
-      // Should allow large transfers after finalize
       await expect(
         token.connect(user1).transfer(user2.address, ethers.parseEther("100000000"))
       ).to.not.be.reverted;
     });
   });
-
-  // ═════════════════════════════════════════════════════════════
-  // FINALIZE TESTS
-  // ═════════════════════════════════════════════════════════════
 
   describe("Finalize", function () {
     beforeEach(async function () {
@@ -272,9 +212,9 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     it("Should revoke all roles from timelock", async function () {
       await token.connect(owner).finalize();
       
-      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), await timelock.getAddress())).to.be.false;
-      expect(await token.hasRole(await token.ADMIN_ROLE(), await timelock.getAddress())).to.be.false;
-      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), await timelock.getAddress())).to.be.false;
+      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), owner.address)).to.be.false;
+      expect(await token.hasRole(await token.ADMIN_ROLE(), owner.address)).to.be.false;
+      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), owner.address)).to.be.false;
     });
 
     it("Should set role admin to bytes32(0)", async function () {
@@ -292,10 +232,9 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
 
     it("Should revert if DEX not set", async function () {
-      // Deploy new token without DEX
       const TokenFactory = await ethers.getContractFactory("ProjectToken");
       const newToken = await TokenFactory.deploy(
-        "T", "T", await timelock.getAddress(),
+        "T", "T", owner.address,
         [user1.address], [MAX_SUPPLY]
       );
       
@@ -331,10 +270,6 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // BURN TESTS
-  // ═════════════════════════════════════════════════════════════
-
   describe("Burn", function () {
     it("Should allow users to burn their tokens", async function () {
       const burnAmount = ethers.parseEther("1000");
@@ -360,10 +295,6 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // TRANSFER TESTS
-  // ═════════════════════════════════════════════════════════════
-
   describe("Transfer", function () {
     it("Should allow standard transfers", async function () {
       await expect(
@@ -377,19 +308,13 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
       await token.connect(owner).setupDEX(pair.address, router.address);
       await token.connect(owner).finalize();
       
-      // Simulate DEX interaction
       await token.connect(user1).approve(pair.address, ethers.parseEther("1000"));
       
-      // Pair should be able to transferFrom
       await expect(
         token.connect(pair).transferFrom(user1.address, user2.address, ethers.parseEther("1000"))
       ).to.not.be.reverted;
     });
   });
-
-  // ═════════════════════════════════════════════════════════════
-  // VIEW FUNCTION TESTS
-  // ═════════════════════════════════════════════════════════════
 
   describe("View Functions", function () {
     it("Should return correct token status", async function () {
@@ -398,33 +323,26 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
       expect(status._finalized).to.be.false;
       expect(status._maxWalletDisabled).to.be.false;
       expect(status._totalMinted).to.equal(MAX_SUPPLY);
-      expect(status._timelock).to.equal(await timelock.getAddress());
+      expect(status._timelock).to.equal(owner.address);
     });
 
     it("Should return correct role status", async function () {
-      expect(await token.hasAdminRole(await timelock.getAddress())).to.be.true;
-      expect(await token.hasDexManagerRole(await timelock.getAddress())).to.be.true;
-      expect(await token.hasDefaultAdminRole(await timelock.getAddress())).to.be.true;
-      
+      expect(await token.hasAdminRole(owner.address)).to.be.true;
+      expect(await token.hasDexManagerRole(owner.address)).to.be.true;
+      expect(await token.hasDefaultAdminRole(owner.address)).to.be.true;
       expect(await token.hasAdminRole(attacker.address)).to.be.false;
     });
   });
-
-  // ═════════════════════════════════════════════════════════════
-  // SECURITY TESTS
-  // ═════════════════════════════════════════════════════════════
 
   describe("Security", function () {
     it("Should not allow attacker to take control", async function () {
       await token.connect(owner).setupDEX(pair.address, router.address);
       await token.connect(owner).finalize();
       
-      // Attacker cannot grant themselves roles
       await expect(
         token.connect(attacker).grantRole(await token.ADMIN_ROLE(), attacker.address)
       ).to.be.reverted;
       
-      // Attacker cannot change maxWallet
       await expect(
         token.connect(attacker).setMaxWalletAmount(ethers.parseEther("1"))
       ).to.be.reverted;
@@ -434,7 +352,6 @@ describe("ProjectToken v7 — Trust-Minimized", function () {
       await token.connect(owner).setupDEX(pair.address, router.address);
       await token.connect(owner).finalize();
       
-      // Verify all immutability conditions
       expect(await token.finalized()).to.be.true;
       expect(await token.maxWalletDisabled()).to.be.true;
       expect(await token.getRoleAdmin(await token.ADMIN_ROLE())).to.equal(ethers.ZeroHash);
