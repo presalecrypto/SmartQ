@@ -167,19 +167,19 @@ contract Vesting is AccessControl, ReentrancyGuard {
         // 25% تحرير فوري، 75% استحقاق
         uint256 immediateRelease = amount / 4;
         uint256 vested = amount - immediateRelease;
-        
+
         vestingSchedules[beneficiary] = VestingSchedule({
-            totalAmount: vestedAmount (beneficiary),
-            releasedAmount: 0,
-            startTime: block.timestamp,
-            beneficiary: beneficiary,
-            initialized: true,
-            createdBy: msg.sender,
-            immediateReleased: false
-        });
-        
-        beneficiaries.push(beneficiary);
-        totalVested += vestedAmount(beneficiary);
+        totalAmount: vested, // ✅ FIX
+    releasedAmount: 0,
+    startTime: block.timestamp,
+    beneficiary: beneficiary,
+    initialized: true,
+    createdBy: msg.sender,
+    immediateReleased: false
+});
+
+beneficiaries.push(beneficiary);
+totalVested += vested; // ✅ FIX
         
         // تحرير الفوري
         if (immediateRelease > 0) {

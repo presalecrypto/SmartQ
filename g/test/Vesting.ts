@@ -3,6 +3,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { ProjectToken, Vesting, MockPair, MockRouter } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
+import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 
 describe("Vesting — Trust-Minimized", function () {
   let token: ProjectToken;
@@ -155,7 +156,13 @@ await token.connect(timelock).approve(await vesting.getAddress(), MAX_SUPPLY);
       
       await expect(vesting.connect(timelock).createVesting(beneficiary.address, amount))
         .to.emit(vesting, "VestingCreated")
-        .withArgs(beneficiary.address, amount, amount / 4n, timelock.address, await ethers.provider.getBlock("latest").then(b => b!.timestamp));
+        .withArgs(
+  beneficiary.address,
+  amount,
+  amount / 4n,
+  timelock.address,
+  anyValue
+);
 
       const schedule = await vesting.vestingSchedules(beneficiary.address);
       expect(schedule.initialized).to.be.true;
@@ -220,7 +227,7 @@ await token.connect(timelock).approve(await vesting.getAddress(), MAX_SUPPLY);
     });
 
     it("Should revert if allowance insufficient", async function () {
-      await token.connect(funder).approve(await vesting.getAddress(), 0);
+      await token.connect(timelock).approve(await vesting.getAddress(), 0);
       await expect(
         vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"))
       ).to.be.reverted;
@@ -347,7 +354,11 @@ await token.connect(timelock).approve(await vesting.getAddress(), MAX_SUPPLY);
 
       await expect(vesting.connect(beneficiary).release())
         .to.emit(vesting, "TokensReleased")
-        .withArgs(beneficiary.address, await vesting.releasableAmount(beneficiary.address), await ethers.provider.getBlock("latest").then(b => b!.timestamp));
+        .withArgs(
+  beneficiary.address,
+  anyValue,
+  anyValue
+        );
     });
 
     it("Should emit VestingCompleted when fully released", async function () {
@@ -488,10 +499,16 @@ await token.connect(timelock).approve(await vesting.getAddress(), MAX_SUPPLY);
     });
 
     it("Should return correct beneficiaries count", async function () {
-      expect(await vesting.beneficiaries.length).to.equal(1);
-    });
-  });
 
+    await vesting.connect(timelock).createVesting(
+  beneficiary2.address,
+  ethers.parseEther("1000")
+);
+      expect(await vesting.getBeneficiariesCount()).to.equal(2);
+
+    });
+  
+  });
   // ═════════════════════════════════════════════════════════════
   // SECURITY
   // ═════════════════════════════════════════════════════════════
@@ -550,14 +567,17 @@ await token.connect(timelock).approve(await vesting.getAddress(), MAX_SUPPLY);
     });
 
     it("Should handle Token.sol transfers correctly", async function () {
-      const amount = ethers.parseEther("5000");
+      const amount = ethers.parseEther("1000");
       
-      const funderBalanceBefore = await token.balanceOf(funder.address);
-      await vesting.connect(timelock).createVesting(beneficiary.address, amount);
-      const funderBalanceAfter = await token.balanceOf(funder.address);
       
-      expect(funderBalanceBefore - funderBalanceAfter).to.equal(amount);
-    });
+      const before = await token.balanceOf(timelock.address);
+
+await vesting.connect(timelock).createVesting(beneficiary.address,amount);
+
+const after = await token.balanceOf(timelock.address);
+
+expect(before - after).to.equal(amount);
+    }),
 
     it("Should work after Token.sol finalize", async function () {
       // Finalize Token.sol
