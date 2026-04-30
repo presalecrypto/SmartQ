@@ -195,6 +195,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         external
         onlySigner
         nonReentrant
+        onlyDuringGovernance
         notFinalized
     {
         Proposal storage p = proposals[id];
