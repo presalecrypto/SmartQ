@@ -264,13 +264,14 @@ contract Vesting is AccessControl, ReentrancyGuard {
     function _cancel(address user) internal {
         VestingSchedule storage s = vesting[user];
         require(s.active && !s.cancelled, "Invalid state");
-        require(obligations >= remaining, "Obligation underflow");
-             obligations -= remaining;
 
         // [إصلاح 3.2] حماية إضافية ضد underflow
         uint256 remaining = s.vestingAllocation > s.released
             ? s.vestingAllocation - s.released
             : 0;
+
+            require(obligations >= remaining, "Obligation underflow");
+               obligations -= remaining;
 
         s.cancelled = true;
         s.active = false;
@@ -291,7 +292,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         uint256 amount = releasable(msg.sender);
         require(amount > 0, "Nothing");
         require(obligations >= amount, "Obligation underflow");
-           obligations -= amount;
+           
 
         s.released += amount;
         totalReleased += amount;
