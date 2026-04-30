@@ -3,15 +3,17 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title ProjectToken
  * @notice ERC20 token with vesting integration, max wallet limits, and automatic decentralization
- * @dev Compatible with Vesting.sol - uses same governance pattern
+ * @dev 100% compatible with Vesting.sol - uses same governance pattern and SafeERC20
  */
 contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
     // ============ Constants ============
     uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10**18;
@@ -21,6 +23,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant DEX_MANAGER_ROLE = keccak256("DEX_MANAGER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant FUNDER_ROLE = keccak256("FUNDER_ROLE"); // ← Compatible with Vesting.sol
 
     // ============ Immutable ============
     address public immutable timelock;
@@ -35,6 +38,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
 
     address public pair;
     address public router;
+    address public vestingContract; // ← Added for Vesting.sol compatibility
 
     mapping(address => bool) public isExcludedFromLimits;
 
@@ -47,10 +51,13 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
     event DEXSetup(address indexed pair, address indexed router);
     event Finalized();
     event ContractImmutable();
-    event RoleRevoked(bytes32 indexed role, address indexed account);
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender); // ← Added
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender); // ← Added
     event TimelockSet(address indexed timelock);
     event GovernanceExpired(uint64 expiryTime);
     event TokensRescued(address indexed token, address indexed to, uint256 amount);
+    event ETHRescued(address indexed to, uint256 amount); // ← Added
+    event VestingContractSet(address indexed vestingContract); // ← Added
 
     // ============ Modifiers ============
     modifier onlyBeforeFinalize() {
@@ -64,7 +71,8 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         string memory symbol,
         address _timelock,
         address[] memory initialRecipients,
-        uint256[] memory initialAmounts
+        uint256[] memory initialAmounts,
+        address _vestingContract // ← Added for Vesting.sol compatibility
     ) ERC20(name, symbol) {
         require(_timelock != address(0), "Invalid timelock");
         require(initialRecipients.length == initialAmounts.length, "Length mismatch");
@@ -79,6 +87,15 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         _grantRole(DEFAULT_ADMIN_ROLE, _timelock);
         _grantRole(ADMIN_ROLE, _timelock);
         _grantRole(DEX_MANAGER_ROLE, _timelock);
+        _grantRole(FUNDER_ROLE, _timelock); // ← Grant FUNDER_ROLE to timelock for Vesting.sol
+
+        // Set vesting contract and exclude from limits
+        if (_vestingContract != address(0)) {
+            vestingContract = _vestingContract;
+            isExcludedFromLimits[_vestingContract] = true;
+            emit AddressExcluded(_vestingContract, true);
+            emit VestingContractSet(_vestingContract);
+        }
 
         for (uint256 i = 0; i < initialRecipients.length; i++) {
             address to = initialRecipients[i];
@@ -86,6 +103,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
 
             require(to != address(0), "Cannot mint to zero");
             require(amount > 0, "Amount must be > 0");
+            require(to.code.length == 0, "Cannot mint to contract"); // ← Added protection
 
             totalMinted += amount;
             _mint(to, amount);
@@ -115,11 +133,13 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         onlyBeforeFinalize
     {
         _checkGovernance();
+        require(account != address(0), "Cannot grant to zero address"); // ← Added
         require(
             hasRole(getRoleAdmin(role), msg.sender) && msg.sender == timelock,
             "Only timelock with role admin"
         );
         super.grantRole(role, account);
+        emit RoleGranted(role, account, msg.sender); // ← Added
     }
 
     function revokeRole(bytes32 role, address account)
@@ -133,6 +153,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
             "Only timelock with role admin"
         );
         super.revokeRole(role, account);
+        emit RoleRevoked(role, account, msg.sender); // ← Added
     }
 
     function renounceRole(bytes32 role, address callerAccount)
@@ -143,6 +164,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         _checkGovernance();
         require(msg.sender == timelock, "Only timelock can renounce");
         super.renounceRole(role, callerAccount);
+        emit RoleRevoked(role, callerAccount, msg.sender); // ← Added
     }
 
     // ============ DEX Setup ============
@@ -207,20 +229,30 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         _checkGovernance();
         require(to != address(0), "Invalid recipient");
         require(amount > 0, "Amount must be > 0");
+        require(_token != address(0), "Invalid token"); // ← Added
 
         // Cannot rescue the token itself if it would break accounting
         if (_token == address(this)) {
-            uint256 circulating = totalSupply();
             require(
                 balanceOf(address(this)) >= amount,
                 "Insufficient contract balance"
             );
-            // Additional check: ensure we don't rescue locked vesting tokens
-            // This is handled by the Vesting contract's own rescue logic
         }
 
-        IERC20(_token).transfer(to, amount);
+        IERC20(_token).safeTransfer(to, amount); // ← Fixed: use safeTransfer
         emit TokensRescued(_token, to, amount);
+    }
+
+    // ← Added: Rescue ETH
+    function rescueETH(address to) external onlyRole(ADMIN_ROLE) onlyBeforeFinalize nonReentrant {
+        _checkGovernance();
+        require(to != address(0), "Invalid recipient");
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to rescue");
+        
+        (bool success, ) = to.call{value: balance}("");
+        require(success, "ETH transfer failed");
+        emit ETHRescued(to, balance);
     }
 
     // ============ Single-Path Finalization ============
@@ -231,8 +263,10 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         // Path 1: Admin finalizes during governance
         if (block.timestamp < deployedAt + GOVERNANCE_PERIOD) {
             require(hasRole(ADMIN_ROLE, msg.sender), "Only admin");
+        } else {
+            // Path 2: Only timelock can finalize after governance expires
+            require(msg.sender == timelock, "Only timelock after expiry"); // ← Fixed
         }
-        // Path 2: Anyone finalizes after governance expires (automatic decentralization)
 
         require(pair != address(0), "DEX not set");
         require(router != address(0), "Router not set");
@@ -246,17 +280,20 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         // Revoke all roles from timelock
         _revokeRole(DEX_MANAGER_ROLE, timelock);
         _revokeRole(ADMIN_ROLE, timelock);
+        _revokeRole(FUNDER_ROLE, timelock); // ← Added
         _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
 
-        emit RoleRevoked(DEX_MANAGER_ROLE, timelock);
-        emit RoleRevoked(ADMIN_ROLE, timelock);
-        emit RoleRevoked(DEFAULT_ADMIN_ROLE, timelock);
+        emit RoleRevoked(DEX_MANAGER_ROLE, timelock, address(this));
+        emit RoleRevoked(ADMIN_ROLE, timelock, address(this));
+        emit RoleRevoked(FUNDER_ROLE, timelock, address(this)); // ← Added
+        emit RoleRevoked(DEFAULT_ADMIN_ROLE, timelock, address(this));
 
         // Disable role administration permanently
         _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
         _setRoleAdmin(ADMIN_ROLE, bytes32(0));
         _setRoleAdmin(DEX_MANAGER_ROLE, bytes32(0));
         _setRoleAdmin(MINTER_ROLE, bytes32(0));
+        _setRoleAdmin(FUNDER_ROLE, bytes32(0)); // ← Added
 
         emit Finalized();
         emit ContractImmutable();
@@ -363,4 +400,11 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
     function hasDefaultAdminRole(address account) external view returns (bool) {
         return hasRole(DEFAULT_ADMIN_ROLE, account);
     }
+
+    function hasFunderRole(address account) external view returns (bool) { // ← Added for Vesting.sol compatibility
+        return hasRole(FUNDER_ROLE, account);
+    }
+
+    // ============ Receive ETH ============
+    receive() external payable {} // ← Added to accept ETH
 }
