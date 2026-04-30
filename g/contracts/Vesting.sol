@@ -133,6 +133,13 @@ contract Vesting is AccessControl, ReentrancyGuard {
         _;
     }
 
+    modifier notFinalized() {
+    require(!finalized, "Finalized"
+    
+    );
+    _;
+}
+
     // ================= PROPOSAL =================
 
     function createProposal(
@@ -252,7 +259,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         obligations += vest;
 
         // التفاعلات الخارجية في النهاية فقط
-        token.safeTransferFrom(msg.sender, address(this), amount);
+        require(token.balanceOf(address(this)) >= obligations + vest, "Insufficient funding");
         if (immediate > 0) {
             token.safeTransfer(user, immediate);
         }
@@ -271,7 +278,6 @@ contract Vesting is AccessControl, ReentrancyGuard {
             : 0;
 
             require(obligations >= remaining, "Obligation underflow");
-               obligations -= remaining;
 
         s.cancelled = true;
         s.active = false;
@@ -318,6 +324,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         uint256 duration = VESTING_DURATION - CLIFF;
 
         uint256 vested = (s.vestingAllocation * elapsed) / duration;
+        if (vested <= s.released) return 0;
         return vested - s.released;
     }
 
@@ -335,10 +342,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
     finalized = true;
 
     uint256 excess = balance - obligations;
-    if (excess > 0) {
-        token.safeTransfer(timelock, excess);
-    }
-
+    
     if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
         _revokeRole(FUNDER_ROLE, timelock);
         _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
