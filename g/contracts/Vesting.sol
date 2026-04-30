@@ -15,6 +15,8 @@ contract Vesting is AccessControl, ReentrancyGuard {
     uint256 public constant GOVERNANCE_PERIOD = 180 days;
     uint256 public constant PROPOSAL_EXPIRY = 3 days;
     uint256 public constant MAX_SIGNERS = 50;
+    uint256 public constant MAX_ACTIVE_PROPOSALS = 100;
+
 
     IERC20 public immutable token;
     address public immutable timelock;
@@ -48,6 +50,8 @@ contract Vesting is AccessControl, ReentrancyGuard {
     mapping(address => VestingSchedule) public vesting;
     mapping(bytes32 => Proposal) public proposals;
     mapping(bytes32 => mapping(address => bool)) public approved;
+    mapping(bytes32 => bool) public proposalExists;
+
 
     mapping(address => bool) public isSigner;
     address[] public signers;
@@ -55,6 +59,8 @@ contract Vesting is AccessControl, ReentrancyGuard {
     uint256 public totalAllocated;
     uint256 public totalReleased;
     uint256 public obligations;
+    uint256 public activeProposalsCount;
+
 
     // ========= EVENTS =========
     event VestingCreated(address indexed user, uint256 total, uint256 immediate, uint256 vest);
@@ -119,24 +125,29 @@ contract Vesting is AccessControl, ReentrancyGuard {
     // ========= PROPOSALS =========
 
     function createProposal(
-        ProposalType pType,
-        address user,
-        uint256 amount
+    ProposalType pType,
+    address user,
+    uint256 amount
     )
-        external
-        onlyRole(FUNDER_ROLE)
-        onlyDuringGovernance
-        notFinalized
-        returns (bytes32)
+    external
+    onlyRole(FUNDER_ROLE)
+    onlyDuringGovernance
+    notFinalized
+    returns (bytes32)
     {
-        bytes32 id = keccak256(abi.encode(pType, user, amount, proposalNonce++));
-        proposals[id] = Proposal(pType, user, amount, 0, uint64(block.timestamp), false);
+    require(activeProposalsCount < MAX_ACTIVE_PROPOSALS, "Max proposals reached");
 
-        emit ProposalCreated(id, pType, user, amount);
-        return id;
+    bytes32 id = keccak256(abi.encode(pType, user, amount, proposalNonce++));
+    proposals[id] = Proposal(pType, user, amount, 0, uint64(block.timestamp), false);
+    
+    activeProposalsCount++;  // ← زيادة العدّاد
+
+    emit ProposalCreated(id, pType, user, amount);
+    return id;
     }
 
-    function approve(bytes32 id) external onlySigner onlyDuringGovernance notFinalized {
+
+    function approve(bytes32 id) external onlySigner nonReentrant onlyDuringGovernance notFinalized {
         Proposal storage p = proposals[id];
 
         require(p.createdAt != 0, "Invalid");
@@ -151,31 +162,34 @@ contract Vesting is AccessControl, ReentrancyGuard {
     }
 
     function execute(bytes32 id)
-        external
-        onlySigner
-        nonReentrant
-        onlyDuringGovernance
-        notFinalized
+    external
+    onlySigner
+    nonReentrant
+    onlyDuringGovernance
+    notFinalized
     {
-        Proposal storage p = proposals[id];
+    Proposal storage p = proposals[id];
 
-        require(p.createdAt != 0, "Invalid");
-        require(!p.executed, "Executed");
-        require(p.approvals >= threshold, "Not enough");
-        require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
+    require(p.createdAt != 0, "Invalid");
+    require(!p.executed, "Executed");
+    require(p.approvals >= threshold, "Not enough");
+    require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
 
-        p.executed = true;
+    p.executed = true;
+    activeProposalsCount--;  // ← إنقاص العدّاد
 
-        if (p.pType == ProposalType.CREATE) {
-            _create(p.user, p.amount);
-        } else if (p.pType == ProposalType.CANCEL) {
-            _cancel(p.user);
-        } else if (p.pType == ProposalType.FINALIZE) {
-            _finalize();
-        }
-
-        emit ProposalExecuted(id);
+    if (p.pType == ProposalType.CREATE) {
+        _create(p.user, p.amount);
+    } else if (p.pType == ProposalType.CANCEL) {
+        _cancel(p.user);
+    } else if (p.pType == ProposalType.FINALIZE) {
+        _finalize();
     }
+
+    emit ProposalExecuted(id);
+    delete proposalExists(id);
+    }
+
 
     // ========= CORE =========
 
@@ -277,12 +291,13 @@ contract Vesting is AccessControl, ReentrancyGuard {
         uint256 accounted = totalAllocated - totalReleased;
         require(accounted == obligations, "Mismatch");
 
-        finalized = true;
 
         uint256 excess = balance - obligations;
         if (excess > 0) {
             token.safeTransfer(timelock, excess);
         }
+
+        finalized = true;
 
         if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
             _revokeRole(FUNDER_ROLE, timelock);
