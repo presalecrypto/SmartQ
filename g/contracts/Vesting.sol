@@ -31,6 +31,8 @@ struct VestingSchedule {
 mapping(address => VestingSchedule) public vestingSchedules;  
 address[] public beneficiaries;  
 
+mapping(address => bool) private isBeneficiary;
+
 uint256 public totalVested;  
 uint256 public totalReleased;  
 
@@ -106,7 +108,7 @@ function createVesting(
     require(amount > 0, "Amount must be > 0");  
     require(beneficiary != msg.sender, "Self vesting not allowed");  
 
-    bool success = token.transferFrom(msg.sender, address(this), amount);  
+    require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");  
     require(success, "Transfer failed");  
 
     uint256 immediateAmount = amount / 4;  
@@ -125,7 +127,10 @@ function createVesting(
     });  
 
 
-    beneficiaries.push(beneficiary);  
+    if (!isBeneficiary[beneficiary]) {
+    beneficiaries.push(beneficiary);
+    isBeneficiary[beneficiary] = true;
+    }  
     totalVested += amount;  
 
     if (immediateAmount > 0) {  
@@ -228,11 +233,12 @@ function releaseBatch(address[] calldata users) external nonReentrant {
         if (s.initialized) {  
             uint256 amount = releasableAmount(user);  
             if (amount > 0) {  
-                require(  
-                    token.balanceOf(address(this)) >= amount,  
-                    "Insufficient contract balance"  
-                );  
-
+                 if (token.balanceOf(address(this)) < amount) {
+                 emit ReleaseFailed(user, amount);
+                 continue;
+                 }
+                   
+                      
                 bool ok = token.transfer(user, amount);  
                 if (!ok) {  
                     emit ReleaseFailed(user, amount);  
