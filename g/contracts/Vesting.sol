@@ -143,6 +143,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         external
         onlyRole(FUNDER_ROLE)
         onlyDuringGovernance
+        notFinalized
         returns (bytes32)
     {
         bytes32 id = keccak256(
@@ -165,6 +166,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         external
         onlySigner
         onlyDuringGovernance
+        notFinalized
     {
         Proposal storage p = proposals[id];
 
@@ -186,6 +188,8 @@ contract Vesting is AccessControl, ReentrancyGuard {
         external
         onlySigner
         nonReentrant
+        onlyDuringGovernance
+        notFinalized
     {
         Proposal storage p = proposals[id];
 
@@ -202,14 +206,19 @@ contract Vesting is AccessControl, ReentrancyGuard {
         p.executed = true;
 
         if (p.pType == ProposalType.CREATE) {
-            _create(p.user, p.amount);
-        } else if (p.pType == ProposalType.CANCEL) {
-            _cancel(p.user);
-        } else if (p.pType == ProposalType.FINALIZE) {
-            _finalize();
-        }
-        // [إصلاح 4.1] إصدار حدث عند التنفيذ
-        emit ProposalExecuted(id);
+        _create(p.user, p.amount);
+    } else if (p.pType == ProposalType.CANCEL) {
+        _cancel(p.user);
+    } else if (p.pType == ProposalType.FINALIZE) {
+        // ❗ finalize فقط داخل governance
+        require(
+            block.timestamp < deployedAt + GOVERNANCE_PERIOD,
+            "Too late to finalize"
+        );
+        _finalize();
+    }
+
+    emit ProposalExecuted(id);
     }
 
     // ================= CORE =================
@@ -255,6 +264,8 @@ contract Vesting is AccessControl, ReentrancyGuard {
     function _cancel(address user) internal {
         VestingSchedule storage s = vesting[user];
         require(s.active && !s.cancelled, "Invalid state");
+        require(obligations >= remaining, "Obligation underflow");
+             obligations -= remaining;
 
         // [إصلاح 3.2] حماية إضافية ضد underflow
         uint256 remaining = s.vestingAllocation > s.released
@@ -279,6 +290,8 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
         uint256 amount = releasable(msg.sender);
         require(amount > 0, "Nothing");
+        require(obligations >= amount, "Obligation underflow");
+           obligations -= amount;
 
         s.released += amount;
         totalReleased += amount;
@@ -310,35 +323,32 @@ contract Vesting is AccessControl, ReentrancyGuard {
     // ================= FINALIZE =================
 
     function _finalize() internal {
-        require(!finalized, "Already finalized");
+    require(!finalized, "Already finalized");
 
-        uint256 balance = token.balanceOf(address(this));
-        require(balance >= obligations, "Insufficient balance");
+    uint256 balance = token.balanceOf(address(this));
+    require(balance >= obligations, "Insufficient balance");
 
-        uint256 accounted = totalAllocated - totalReleased;
-        require(accounted == obligations, "Accounting mismatch");
+    uint256 accounted = totalAllocated - totalReleased;
+    require(accounted == obligations, "Accounting mismatch");
 
-        finalized = true;
+    finalized = true;
 
-        // [إصلاح 3.3] إرجاع التوكنات الزائدة إلى timelock بدلاً من حجزها
-        uint256 excess = balance - obligations;
-        if (excess > 0) {
-            token.safeTransfer(timelock, excess);
-        }
+    uint256 excess = balance - obligations;
+    if (excess > 0) {
+        token.safeTransfer(timelock, excess);
+    }
 
-        // إزالة التحكم بالكامل بعد 180 يوم
-        if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
-            _revokeRole(FUNDER_ROLE, timelock);
-            _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
+    if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
+        _revokeRole(FUNDER_ROLE, timelock);
+        _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
 
-            _setRoleAdmin(FUNDER_ROLE, bytes32(0));
-            _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
-            // [إصلاح 4.1] إصدار حدث
-            emit GovernanceEnded();
-        }
+        _setRoleAdmin(FUNDER_ROLE, bytes32(0));
+        _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
 
-        // [إصلاح 4.1] إصدار حدث
-        emit Finalized(block.timestamp);
+        emit GovernanceEnded();
+    }
+
+    emit Finalized(block.timestamp);
     }
 
     // [إصلاح 4.2] إضافة دوال view لتسهيل قراءة البيانات
