@@ -14,7 +14,6 @@ contract Vesting is AccessControl, ReentrancyGuard {
     uint256 public constant VESTING_DURATION = 90 days;
     uint256 public constant GOVERNANCE_PERIOD = 180 days;
     uint256 public constant PROPOSAL_EXPIRY = 3 days;
-    // [إصلاح 2.2] إضافة حد أقصى لعدد signers لمنع تجاوز حد الغاز
     uint256 public constant MAX_SIGNERS = 50;
 
     IERC20 public immutable token;
@@ -57,25 +56,16 @@ contract Vesting is AccessControl, ReentrancyGuard {
     uint256 public totalReleased;
     uint256 public obligations;
 
-    // [إصلاح 4.1] إضافة أحداث لتتبع العمليات على البلوكتشين
-    event VestingCreated(
-        address indexed user,
-        uint256 totalAllocation,
-        uint256 immediate,
-        uint256 vestingAllocation
-    );
+    // ========= EVENTS =========
+    event VestingCreated(address indexed user, uint256 total, uint256 immediate, uint256 vest);
     event VestingCancelled(address indexed user, uint256 remaining);
     event TokensReleased(address indexed user, uint256 amount);
-    event ProposalCreated(
-        bytes32 indexed id,
-        ProposalType indexed pType,
-        address indexed user,
-        uint256 amount
-    );
+    event ProposalCreated(bytes32 indexed id, ProposalType pType, address indexed user, uint256 amount);
     event ProposalApproved(bytes32 indexed id, address indexed signer);
     event ProposalExecuted(bytes32 indexed id);
     event Finalized(uint256 timestamp);
     event GovernanceEnded();
+    event Funded(address indexed from, uint256 amount);
 
     constructor(
         address _token,
@@ -83,17 +73,10 @@ contract Vesting is AccessControl, ReentrancyGuard {
         address[] memory _signers,
         uint256 _threshold
     ) {
-        // [إصلاح 2.3] التحقق من عدم الصفر للعناوين الحساسة
         require(_token != address(0), "Invalid token");
         require(_timelock != address(0), "Invalid timelock");
-        // [إصلاح 2.2] التحقق من وجود signers وعدم تجاوز الحد الأقصى
-        require(_signers.length > 0, "No signers");
-        require(_signers.length <= MAX_SIGNERS, "Too many signers");
-        // [إصلاح 3.1] التحقق من أن threshold منطقي ولا يتجاوز عدد signers
-        require(
-            _threshold >= 2 && _threshold <= _signers.length,
-            "Bad threshold"
-        );
+        require(_signers.length > 0 && _signers.length <= MAX_SIGNERS, "Bad signers");
+        require(_threshold >= 2 && _threshold <= _signers.length, "Bad threshold");
 
         token = IERC20(_token);
         timelock = _timelock;
@@ -104,7 +87,6 @@ contract Vesting is AccessControl, ReentrancyGuard {
         _grantRole(FUNDER_ROLE, _timelock);
 
         for (uint i; i < _signers.length; i++) {
-            // [إصلاح 2.3] التحقق من أن signer ليس عنوان صفر
             require(_signers[i] != address(0), "Invalid signer");
             require(!isSigner[_signers[i]], "Duplicate signer");
             isSigner[_signers[i]] = true;
@@ -118,29 +100,23 @@ contract Vesting is AccessControl, ReentrancyGuard {
     }
 
     modifier onlyDuringGovernance() {
-        require(
-            block.timestamp < deployedAt + GOVERNANCE_PERIOD,
-            "Governance ended"
-        );
-        _;
-    }
-
-    modifier onlyAfterGovernance() {
-        require(
-            block.timestamp >= deployedAt + GOVERNANCE_PERIOD,
-            "Still governed"
-        );
+        require(block.timestamp < deployedAt + GOVERNANCE_PERIOD, "Governance ended");
         _;
     }
 
     modifier notFinalized() {
-    require(!finalized, "Finalized"
-    
-    );
-    _;
+        require(!finalized, "Finalized");
+        _;
     }
 
-    // ================= PROPOSAL =================
+    // ========= FUND =========
+    function fund(uint256 amount) external onlyRole(FUNDER_ROLE) {
+        require(amount > 0, "Zero amount");
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        emit Funded(msg.sender, amount);
+    }
+
+    // ========= PROPOSALS =========
 
     function createProposal(
         ProposalType pType,
@@ -153,41 +129,24 @@ contract Vesting is AccessControl, ReentrancyGuard {
         notFinalized
         returns (bytes32)
     {
-        bytes32 id = keccak256(
-            abi.encode(pType, user, amount, proposalNonce++)
-        );
-        proposals[id] = Proposal(
-            pType,
-            user,
-            amount,
-            0,
-            uint64(block.timestamp),
-            false
-        );
-        // [إصلاح 4.1] إصدار حدث عند إنشاء الاقتراح
+        bytes32 id = keccak256(abi.encode(pType, user, amount, proposalNonce++));
+        proposals[id] = Proposal(pType, user, amount, 0, uint64(block.timestamp), false);
+
         emit ProposalCreated(id, pType, user, amount);
         return id;
     }
 
-    function approve(bytes32 id)
-        external
-        onlySigner
-        onlyDuringGovernance
-        notFinalized
-    {
+    function approve(bytes32 id) external onlySigner onlyDuringGovernance notFinalized {
         Proposal storage p = proposals[id];
 
-        require(p.createdAt != 0, "Invalid proposal");
+        require(p.createdAt != 0, "Invalid");
         require(!p.executed, "Executed");
-        require(
-            block.timestamp <= p.createdAt + PROPOSAL_EXPIRY,
-            "Expired"
-        );
-        require(!approved[id][msg.sender], "Already approved");
+        require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
+        require(!approved[id][msg.sender], "Approved");
 
         approved[id][msg.sender] = true;
         p.approvals++;
-        // [إصلاح 4.1] إصدار حدث عند الموافقة
+
         emit ProposalApproved(id, msg.sender);
     }
 
@@ -200,46 +159,37 @@ contract Vesting is AccessControl, ReentrancyGuard {
     {
         Proposal storage p = proposals[id];
 
-        require(p.createdAt != 0, "Invalid proposal");
+        require(p.createdAt != 0, "Invalid");
         require(!p.executed, "Executed");
-        require(p.approvals >= threshold, "Not enough approvals");
-
-        // منع تنفيذ proposal المنتهي
-        require(
-            block.timestamp <= p.createdAt + PROPOSAL_EXPIRY,
-            "Expired"
-        );
+        require(p.approvals >= threshold, "Not enough");
+        require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
 
         p.executed = true;
 
         if (p.pType == ProposalType.CREATE) {
-        _create(p.user, p.amount);
-    } else if (p.pType == ProposalType.CANCEL) {
-        _cancel(p.user);
-    } else if (p.pType == ProposalType.FINALIZE) {
-        
-        _finalize();
+            _create(p.user, p.amount);
+        } else if (p.pType == ProposalType.CANCEL) {
+            _cancel(p.user);
+        } else if (p.pType == ProposalType.FINALIZE) {
+            _finalize();
+        }
+
+        emit ProposalExecuted(id);
     }
 
-    emit ProposalExecuted(id);
-    }
-
-    // ================= CORE =================
+    // ========= CORE =========
 
     function _create(address user, uint256 amount) internal {
-        // [إصلاح 2.3] التحقق من أن المستخدم ليس عنوان صفر
         require(user != address(0), "Invalid user");
-        require(
-            !vesting[user].active && !vesting[user].cancelled,
-            "Already exists"
-        );
-        require(amount > 0, "Zero amount");
+        require(!vesting[user].active && !vesting[user].cancelled, "Exists");
+        require(amount > 0, "Zero");
 
         uint256 immediate = (amount * 2500) / 10000;
         uint256 vest = amount - immediate;
 
-        // [إصلاح 1.1] تطبيق Checks-Effects-Interactions pattern
-        // تحديث الحالة أولاً قبل أي تفاعل خارجي
+        uint256 newObligations = obligations + vest;
+        require(token.balanceOf(address(this)) >= newObligations, "Insufficient funding");
+
         vesting[user] = VestingSchedule(
             amount,
             vest,
@@ -250,30 +200,26 @@ contract Vesting is AccessControl, ReentrancyGuard {
             immediate
         );
 
+        obligations = newObligations;
         totalAllocated += amount;
         totalReleased += immediate;
-        obligations += vest;
 
-        // التفاعلات الخارجية في النهاية فقط
-        require(token.balanceOf(address(this)) >= obligations, "Insufficient funding");
         if (immediate > 0) {
             token.safeTransfer(user, immediate);
         }
 
-        // [إصلاح 4.1] إصدار حدث
         emit VestingCreated(user, amount, immediate, vest);
     }
 
     function _cancel(address user) internal {
         VestingSchedule storage s = vesting[user];
-        require(s.active && !s.cancelled, "Invalid state");
+        require(s.active && !s.cancelled, "Invalid");
 
-        // [إصلاح 3.2] حماية إضافية ضد underflow
         uint256 remaining = s.vestingAllocation > s.released
             ? s.vestingAllocation - s.released
             : 0;
 
-            require(obligations >= remaining, "Obligation underflow");
+        require(obligations >= remaining, "Underflow");
 
         s.cancelled = true;
         s.active = false;
@@ -283,7 +229,6 @@ contract Vesting is AccessControl, ReentrancyGuard {
             token.safeTransfer(msg.sender, remaining);
         }
 
-        // [إصلاح 4.1] إصدار حدث
         emit VestingCancelled(user, remaining);
     }
 
@@ -293,16 +238,14 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
         uint256 amount = releasable(msg.sender);
         require(amount > 0, "Nothing");
-        require(obligations >= amount, "Obligation underflow");
-           
+        require(obligations >= amount, "Invariant");
 
         s.released += amount;
-        totalReleased += amount;
         obligations -= amount;
+        totalReleased += amount;
 
         token.safeTransfer(msg.sender, amount);
 
-        // [إصلاح 4.1] إصدار حدث
         emit TokensReleased(msg.sender, amount);
     }
 
@@ -320,79 +263,55 @@ contract Vesting is AccessControl, ReentrancyGuard {
         uint256 duration = VESTING_DURATION - CLIFF;
 
         uint256 vested = (s.vestingAllocation * elapsed) / duration;
-        if (vested <= s.released) return 0;
-        return vested - s.released;
+        return vested > s.released ? vested - s.released : 0;
     }
 
-    // ================= FINALIZE =================
+    // ========= FINALIZE =========
 
     function _finalize() internal {
-    require(!finalized, "Already finalized");
+        require(!finalized, "Finalized");
 
-    uint256 balance = token.balanceOf(address(this));
-    require(balance >= obligations, "Insufficient balance");
+        uint256 balance = token.balanceOf(address(this));
+        require(balance >= obligations, "Insufficient");
 
-    uint256 accounted = totalAllocated - totalReleased;
-    require(accounted == obligations, "Accounting mismatch");
+        uint256 accounted = totalAllocated - totalReleased;
+        require(accounted == obligations, "Mismatch");
 
-    finalized = true;
+        finalized = true;
 
-    uint256 excess = balance - obligations;
-    
-     if (excess > 0) {
-    token.safeTransfer(timelock, excess);
+        uint256 excess = balance - obligations;
+        if (excess > 0) {
+            token.safeTransfer(timelock, excess);
+        }
+
+        if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
+            _revokeRole(FUNDER_ROLE, timelock);
+            _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
+
+            _setRoleAdmin(FUNDER_ROLE, bytes32(0));
+            _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
+
+            emit GovernanceEnded();
+        }
+
+        emit Finalized(block.timestamp);
     }
 
-    if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
-        _revokeRole(FUNDER_ROLE, timelock);
-        _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
+    // ========= VIEW =========
 
-        _setRoleAdmin(FUNDER_ROLE, bytes32(0));
-        _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
-
-        emit GovernanceEnded();
-    }
-
-    emit Finalized(block.timestamp);
-    }
-
-    // [إصلاح 4.2] إضافة دوال view لتسهيل قراءة البيانات
-    function getProposal(bytes32 id)
-        external
-        view
-        returns (Proposal memory)
-    {
-        return proposals[id];
-    }
-
-    function getVesting(address user)
-        external
-        view
-        returns (VestingSchedule memory)
-    {
-        return vesting[user];
-    }
-
-    function getSigners()
-        external
-        view
-        returns (address[] memory)
-    {
+    function getSigners() external view returns (address[] memory) {
         return signers;
     }
 
-    event Funded(address indexed from, uint256 amount);
-
-
-    function fund(uint256 amount) external onlyRole(FUNDER_ROLE) {
-    require(amount > 0, "Zero amount");
-    token.safeTransferFrom(msg.sender, address(this), amount);
+    function getProposal(bytes32 id) external view returns (Proposal memory) {
+        return proposals[id];
     }
-    function getProposalApproval(bytes32 id, address signer)
-        external
-        view
-        returns (bool)
-    {
+
+    function getVesting(address user) external view returns (VestingSchedule memory) {
+        return vesting[user];
+    }
+
+    function getProposalApproval(bytes32 id, address signer) external view returns (bool) {
         return approved[id][signer];
     }
 }
