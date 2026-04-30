@@ -138,8 +138,10 @@ contract Vesting is AccessControl, ReentrancyGuard {
     require(activeProposalsCount < MAX_ACTIVE_PROPOSALS, "Max proposals reached");
 
     bytes32 id = keccak256(abi.encode(pType, user, amount, proposalNonce++));
+    require(!proposalExists[id], "Duplicate proposal");
     proposals[id] = Proposal(pType, user, amount, 0, uint64(block.timestamp), false);
-    
+    proposalExists[id] = true;
+
     activeProposalsCount++;  // ← زيادة العدّاد
 
     emit ProposalCreated(id, pType, user, amount);
@@ -185,9 +187,13 @@ contract Vesting is AccessControl, ReentrancyGuard {
     } else if (p.pType == ProposalType.FINALIZE) {
         _finalize();
     }
+     
+    active activeProposalsCount--;
 
+    delete proposalExists[id];
+    
     emit ProposalExecuted(id);
-    delete proposalExists(id);
+    
     }
 
 
