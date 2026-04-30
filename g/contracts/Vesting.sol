@@ -138,7 +138,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
     
     );
     _;
-}
+    }
 
     // ================= PROPOSAL =================
 
@@ -195,7 +195,6 @@ contract Vesting is AccessControl, ReentrancyGuard {
         external
         onlySigner
         nonReentrant
-        onlyDuringGovernance
         notFinalized
     {
         Proposal storage p = proposals[id];
@@ -259,7 +258,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         obligations += vest;
 
         // التفاعلات الخارجية في النهاية فقط
-        require(token.balanceOf(address(this)) >= obligations + vest, "Insufficient funding");
+        require(token.balanceOf(address(this)) >= obligations, "Insufficient funding");
         if (immediate > 0) {
             token.safeTransfer(user, immediate);
         }
@@ -343,6 +342,10 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
     uint256 excess = balance - obligations;
     
+     if (excess > 0) {
+    token.safeTransfer(timelock, excess);
+    }
+
     if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
         _revokeRole(FUNDER_ROLE, timelock);
         _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
@@ -381,6 +384,10 @@ contract Vesting is AccessControl, ReentrancyGuard {
         return signers;
     }
 
+    function fund(uint256 amount) external onlyRole(FUNDER_ROLE) {
+    require(amount > 0, "Zero amount");
+    token.safeTransferFrom(msg.sender, address(this), amount);
+    }
     function getProposalApproval(bytes32 id, address signer)
         external
         view
