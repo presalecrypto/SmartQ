@@ -216,11 +216,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
     } else if (p.pType == ProposalType.CANCEL) {
         _cancel(p.user);
     } else if (p.pType == ProposalType.FINALIZE) {
-        // ❗ finalize فقط داخل governance
-        require(
-            block.timestamp < deployedAt + GOVERNANCE_PERIOD,
-            "Too late to finalize"
-        );
+        
         _finalize();
     }
 
@@ -383,6 +379,9 @@ contract Vesting is AccessControl, ReentrancyGuard {
     {
         return signers;
     }
+
+    event Funded(address indexed from, uint256 amount);
+
 
     function fund(uint256 amount) external onlyRole(FUNDER_ROLE) {
     require(amount > 0, "Zero amount");
