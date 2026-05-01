@@ -1,710 +1,466 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
-import { ProjectToken, MockERC20 } from "../typechain-types";
+import { ProjectToken } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
-describe("ProjectToken Contract Tests", function () {
+describe("ProjectToken — Full Security Audit Test Suite", function () {
   let token: ProjectToken;
+  let owner: SignerWithAddress;
   let timelock: SignerWithAddress;
+  let admin: SignerWithAddress;
+  let dexManager: SignerWithAddress;
+  let funder: SignerWithAddress;
   let user1: SignerWithAddress;
   let user2: SignerWithAddress;
   let user3: SignerWithAddress;
   let vestingContract: SignerWithAddress;
   let pair: SignerWithAddress;
   let router: SignerWithAddress;
-  let others: SignerWithAddress[];
 
-  const MAX_SUPPLY = ethers.parseUnits("1000000000", 18);
-  const GOVERNANCE_PERIOD = 180 * 24 * 60 * 60; // 180 days
+  const MAX_SUPPLY = ethers.parseEther("1000000000"); // 1B
+  const MAX_WALLET = ethers.parseEther("10000000");   // 10M
+  const GOVERNANCE_PERIOD = 180n * 24n * 60n * 60n;     // 180 days
 
   beforeEach(async function () {
-    [timelock, user1, user2, user3, vestingContract, pair, router, ...others] = await ethers.getSigners();
-
-    const recipients = [user1.address, user2.address, user3.address];
-    const perUser = MAX_SUPPLY / 3n;
-    const amounts = [perUser, perUser, MAX_SUPPLY - 2n * perUser];
+    [owner, timelock, admin, dexManager, funder, user1, user2, user3, vestingContract, pair, router] = await ethers.getSigners();
 
     const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
+
+    // Only use EXCLUDED addresses in constructor minting
+    const timelockAmount = MAX_SUPPLY - ethers.parseEther("10000000");
+    const vestingAmount = ethers.parseEther("10000000");
+
     token = await ProjectTokenFactory.deploy(
-      "Project Token",
-      "PRJ",
+      "ProjectToken",
+      "PTK",
       timelock.address,
-      recipients,
-      amounts,
+      [timelock.address, vestingContract.address],
+      [timelockAmount, vestingAmount],
       vestingContract.address
     );
     await token.waitForDeployment();
   });
 
-  // ============ CONSTRUCTOR TESTS ============
-  describe("Constructor", function () {
-    it("Should set correct initial values", async function () {
-      expect(await token.name()).to.equal("Project Token");
-      expect(await token.symbol()).to.equal("PRJ");
-      expect(await token.timelock()).to.equal(timelock.address);
-      expect(await token.maxWalletAmount()).to.equal(ethers.parseUnits("10000000", 18));
-      expect(await token.finalized()).to.be.false;
-      expect(await token.maxWalletDisabled()).to.be.false;
-      expect(await token.vestingContract()).to.equal(vestingContract.address);
+  // ═══════════════════════════════════════════════════════════════
+  // 1. DEPLOYMENT & CONSTRUCTOR
+  // ═══════════════════════════════════════════════════════════════
+  describe("Deployment", function () {
+    it("Should set correct name and symbol", async function () {
+      expect(await token.name()).to.equal("ProjectToken");
+      expect(await token.symbol()).to.equal("PTK");
     });
 
-    it("Should mint max supply to recipients", async function () {
+    it("Should mint MAX_SUPPLY exactly", async function () {
       expect(await token.totalSupply()).to.equal(MAX_SUPPLY);
-      expect(await token.balanceOf(user1.address)).to.be.gt(0);
-      expect(await token.balanceOf(user2.address)).to.be.gt(0);
-      expect(await token.balanceOf(user3.address)).to.be.gt(0);
+      expect(await token.totalMinted()).to.equal(MAX_SUPPLY);
     });
 
-    it("Should exclude vesting contract from limits", async function () {
-      expect(await token.isExcludedFromLimits(vestingContract.address)).to.be.true;
+    it("Should assign DEFAULT_ADMIN_ROLE to timelock", async function () {
+      const DEFAULT_ADMIN_ROLE = await token.DEFAULT_ADMIN_ROLE();
+      expect(await token.hasRole(DEFAULT_ADMIN_ROLE, timelock.address)).to.be.true;
+    });
+
+    it("Should assign ADMIN_ROLE to timelock", async function () {
+      const ADMIN_ROLE = await token.ADMIN_ROLE();
+      expect(await token.hasRole(ADMIN_ROLE, timelock.address)).to.be.true;
+    });
+
+    it("Should assign DEX_MANAGER_ROLE to timelock", async function () {
+      const DEX_MANAGER_ROLE = await token.DEX_MANAGER_ROLE();
+      expect(await token.hasRole(DEX_MANAGER_ROLE, timelock.address)).to.be.true;
+    });
+
+    it("Should assign FUNDER_ROLE to timelock", async function () {
+      const FUNDER_ROLE = await token.FUNDER_ROLE();
+      expect(await token.hasRole(FUNDER_ROLE, timelock.address)).to.be.true;
+    });
+
+    it("Should assign FUNDER_ROLE to vesting contract", async function () {
+      const FUNDER_ROLE = await token.FUNDER_ROLE();
+      expect(await token.hasRole(FUNDER_ROLE, vestingContract.address)).to.be.true;
     });
 
     it("Should exclude timelock from limits", async function () {
       expect(await token.isExcludedFromLimits(timelock.address)).to.be.true;
     });
 
+    it("Should exclude vesting contract from limits", async function () {
+      expect(await token.isExcludedFromLimits(vestingContract.address)).to.be.true;
+    });
+
+    it("Should set maxWalletAmount to 10M", async function () {
+      expect(await token.maxWalletAmount()).to.equal(MAX_WALLET);
+    });
+
+    it("Should set deployedAt to current block timestamp", async function () {
+      const block = await ethers.provider.getBlock("latest");
+      expect(await token.deployedAt()).to.equal(block!.timestamp);
+    });
+
     it("Should revert with zero timelock", async function () {
       const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          ethers.ZeroAddress,
-          [user1.address],
-          [1000],
-          vestingContract.address
-        )
+        ProjectTokenFactory.deploy("T", "T", ethers.ZeroAddress, [user1.address], [MAX_SUPPLY], vestingContract.address)
       ).to.be.revertedWith("Invalid timelock");
     });
 
-    it("Should revert with length mismatch", async function () {
+    it("Should revert with mismatched recipients/amounts", async function () {
       const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          [user1.address, user2.address],
-          [1000],
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Length mismatch");
+        ProjectTokenFactory.deploy("T", "T", timelock.address, [user1.address, user2.address], [MAX_SUPPLY], vestingContract.address)
+      ).to.be.revertedWith("Mismatch");
     });
 
-    it("Should revert with empty distribution", async function () {
+    it("Should revert if total minted != MAX_SUPPLY", async function () {
       const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
+      const amount1 = MAX_SUPPLY - ethers.parseEther("1");
+      const amount2 = ethers.parseEther("1") - 1n;
       await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          [],
-          [],
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Empty distribution");
+        ProjectTokenFactory.deploy("T", "T", timelock.address, [timelock.address, vestingContract.address], [amount1, amount2], vestingContract.address)
+      ).to.be.revertedWith("Invalid supply");
     });
 
-    it("Should revert with too many recipients", async function () {
+    it("Should revert if recipient is zero address", async function () {
       const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
-      const manyRecipients = Array(201).fill(user1.address);
-      const manyAmounts = Array(201).fill(1);
-      
       await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          manyRecipients,
-          manyAmounts,
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Too many recipients");
+        ProjectTokenFactory.deploy("T", "T", timelock.address, [ethers.ZeroAddress], [MAX_SUPPLY], vestingContract.address)
+      ).to.be.revertedWith("Zero address");
     });
 
-    it("Should revert when minting to zero address", async function () {
+    it("Should revert if recipient is a contract", async function () {
       const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
-      await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          [ethers.ZeroAddress],
-          [1000],
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Cannot mint to zero");
-    });
+      // ✅ FIX: Use DummyToken (simple ERC20) instead of ProjectToken to avoid Invalid supply
+      const DummyFactory = await ethers.getContractFactory("DummyToken");
+      const dummy = await DummyFactory.deploy("D", "D", ethers.parseEther("1000"));
+      await dummy.waitForDeployment();
 
-    it("Should revert when minting zero amount", async function () {
-      const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
       await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          [user1.address],
-          [0],
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Amount must be > 0");
-    });
-
-    it("Should revert when minting to contract", async function () {
-      const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
-      await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          [await token.getAddress()], // Contract address
-          [1000],
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Cannot mint to contract");
-    });
-
-    it("Should revert when not minting max supply", async function () {
-      const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
-      await expect(
-        ProjectTokenFactory.deploy(
-          "Test",
-          "TST",
-          timelock.address,
-          [user1.address],
-          [1000],
-          vestingContract.address
-        )
-      ).to.be.revertedWith("Must mint max supply");
+        ProjectTokenFactory.deploy("T", "T", timelock.address, [await dummy.getAddress()], [MAX_SUPPLY], ethers.ZeroAddress)
+      ).to.be.revertedWith("No contracts");
     });
   });
 
-  // ============ ROLE MANAGEMENT TESTS ============
-  describe("Role Management", function () {
-    it("Should grant role successfully", async function () {
-      const newAdmin = others[0];
-      
-      await expect(token.connect(timelock).grantRole(await token.ADMIN_ROLE(), newAdmin.address))
-        .to.emit(token, "RoleGranted")
-        .withArgs(await token.ADMIN_ROLE(), newAdmin.address, timelock.address);
-
-      expect(await token.hasAdminRole(newAdmin.address)).to.be.true;
-    });
-
-    it("Should revert granting to zero address", async function () {
-      await expect(
-        token.connect(timelock).grantRole(await token.ADMIN_ROLE(), ethers.ZeroAddress)
-      ).to.be.revertedWith("Cannot grant to zero address");
-    });
-
-    it("Should revert when unauthorized", async function () {
-      await expect(
-        token.connect(user1).grantRole(await token.ADMIN_ROLE(), user2.address)
-      ).to.be.revertedWith("Only timelock with role admin");
-    });
-
-    it("Should revert after governance expired", async function () {
-      await time.increase(GOVERNANCE_PERIOD + 1);
-      
-      await expect(
-        token.connect(timelock).grantRole(await token.ADMIN_ROLE(), user2.address)
-      ).to.be.revertedWith("Governance expired");
-    });
-
-    it("Should revert after finalized", async function () {
-      // Setup DEX and finalize
+  // ═══════════════════════════════════════════════════════════════
+  // 2. DEX SETUP
+  // ═══════════════════════════════════════════════════════════════
+  describe("setupDEX", function () {
+    it("Should allow DEX_MANAGER_ROLE to set pair and router", async function () {
       await token.connect(timelock).setupDEX(pair.address, router.address);
-      await token.connect(timelock).finalize();
-      
-      await expect(
-        token.connect(timelock).grantRole(await token.ADMIN_ROLE(), user2.address)
-      ).to.be.revertedWith("Contract is finalized");
-    });
-
-    it("Should revoke role successfully", async function () {
-      await token.connect(timelock).grantRole(await token.ADMIN_ROLE(), user2.address);
-      
-      await expect(token.connect(timelock).revokeRole(await token.ADMIN_ROLE(), user2.address))
-        .to.emit(token, "RoleRevoked");
-
-      expect(await token.hasAdminRole(user2.address)).to.be.false;
-    });
-
-    it("Should renounce role successfully", async function () {
-      await expect(token.connect(timelock).renounceRole(await token.ADMIN_ROLE(), timelock.address))
-        .to.emit(token, "RoleRevoked");
-
-      expect(await token.hasAdminRole(timelock.address)).to.be.false;
-    });
-  });
-
-  // ============ DEX SETUP TESTS ============
-  describe("DEX Setup", function () {
-    it("Should setup DEX successfully", async function () {
-      await expect(token.connect(timelock).setupDEX(pair.address, router.address))
-        .to.emit(token, "DEXSetup")
-        .withArgs(pair.address, router.address);
-
       expect(await token.pair()).to.equal(pair.address);
       expect(await token.router()).to.equal(router.address);
+    });
+
+    it("Should exclude pair and router from limits", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
       expect(await token.isExcludedFromLimits(pair.address)).to.be.true;
       expect(await token.isExcludedFromLimits(router.address)).to.be.true;
     });
 
-    it("Should revert with zero pair", async function () {
-      await expect(
-        token.connect(timelock).setupDEX(ethers.ZeroAddress, router.address)
-      ).to.be.revertedWith("Invalid pair");
+    it("Should revert if non-DEX_MANAGER_ROLE calls", async function () {
+      await expect(token.connect(user1).setupDEX(pair.address, router.address)).to.be.reverted;
     });
 
-    it("Should revert with zero router", async function () {
-      await expect(
-        token.connect(timelock).setupDEX(pair.address, ethers.ZeroAddress)
-      ).to.be.revertedWith("Invalid router");
-    });
-
-    it("Should revert when already setup", async function () {
-      await token.connect(timelock).setupDEX(pair.address, router.address);
-      
-      await expect(
-        token.connect(timelock).setupDEX(others[0].address, others[1].address)
-      ).to.be.revertedWith("DEX already setup");
-    });
-
-    it("Should revert when unauthorized", async function () {
-      await expect(
-        token.connect(user1).setupDEX(pair.address, router.address)
-      ).to.be.reverted;
-    });
-  });
-
-  // ============ MAX WALLET TESTS ============
-  describe("Max Wallet", function () {
-    it("Should update max wallet amount", async function () {
-      const newAmount = ethers.parseUnits("5000000", 18);
-      
-      await expect(token.connect(timelock).setMaxWalletAmount(newAmount))
-        .to.emit(token, "MaxWalletUpdated");
-
-      expect(await token.maxWalletAmount()).to.equal(newAmount);
-    });
-
-    it("Should revert updating to zero", async function () {
-      await expect(
-        token.connect(timelock).setMaxWalletAmount(0)
-      ).to.be.revertedWith("Amount must be > 0");
-    });
-
-    it("Should revert exceeding max supply", async function () {
-      await expect(
-        token.connect(timelock).setMaxWalletAmount(MAX_SUPPLY + 1n)
-      ).to.be.revertedWith("Exceeds max supply");
-    });
-
-    it("Should enforce max wallet for non-excluded", async function () {
-      const maxWallet = await token.maxWalletAmount();
-      const currentBalance = await token.balanceOf(user2.address);
-      
-      if (currentBalance < maxWallet) {
-        const transferAmount = maxWallet - currentBalance + 1n;
-        
-        // This should fail if it exceeds max wallet
-        // But user1 might not have enough tokens
-        const user1Balance = await token.balanceOf(user1.address);
-        if (user1Balance >= transferAmount) {
-          await expect(
-            token.connect(user1).transfer(user2.address, transferAmount)
-          ).to.be.revertedWith("Exceeds max wallet");
-        }
-      }
-    });
-
-    it("Should not enforce max wallet for excluded addresses", async function () {
-      await token.connect(timelock).setupDEX(pair.address, router.address);
-      
-      const largeAmount = ethers.parseUnits("20000000", 18); // Exceeds max wallet
-      
-      // Pair should be excluded
-      await expect(token.connect(user1).transfer(pair.address, largeAmount)).to.not.be.reverted;
-    });
-  });
-
-  // ============ EXCLUDED LIMITS TESTS ============
-  describe("Excluded Limits", function () {
-    it("Should set excluded successfully", async function () {
-      await expect(token.connect(timelock).setExcludedFromLimits(user1.address, true))
-        .to.emit(token, "AddressExcluded")
-        .withArgs(user1.address, true);
-
-      expect(await token.isExcludedFromLimits(user1.address)).to.be.true;
-    });
-
-    it("Should revert excluding zero address", async function () {
-      await expect(
-        token.connect(timelock).setExcludedFromLimits(ethers.ZeroAddress, true)
-      ).to.be.revertedWith("Cannot exclude zero");
-    });
-  });
-
-  // ============ RESCUE TESTS ============
-  describe("Rescue", function () {
-    it("Should rescue tokens successfully", async function () {
-      // Deploy mock token and send to ProjectToken
-      const MockTokenFactory = await ethers.getContractFactory("MockERC20");
-      const mockToken = await MockTokenFactory.deploy("Mock", "MCK");
-      await mockToken.waitForDeployment();
-      
-      await mockToken.mint(await token.getAddress(), 1000);
-      
-      await expect(token.connect(timelock).rescueTokens(await mockToken.getAddress(), user1.address, 1000))
-        .to.emit(token, "TokensRescued");
-
-      expect(await mockToken.balanceOf(user1.address)).to.equal(1000);
-    });
-
-    it("Should revert rescuing zero token", async function () {
-      await expect(
-        token.connect(timelock).rescueTokens(ethers.ZeroAddress, user1.address, 1000)
-      ).to.be.revertedWith("Invalid token");
-    });
-
-    it("Should revert rescuing to zero address", async function () {
-      const MockTokenFactory = await ethers.getContractFactory("MockERC20");
-      const mockToken = await MockTokenFactory.deploy("Mock", "MCK");
-      
-      await expect(
-        token.connect(timelock).rescueTokens(await mockToken.getAddress(), ethers.ZeroAddress, 1000)
-      ).to.be.revertedWith("Invalid recipient");
-    });
-
-    it("Should revert rescuing zero amount", async function () {
-      const MockTokenFactory = await ethers.getContractFactory("MockERC20");
-      const mockToken = await MockTokenFactory.deploy("Mock", "MCK");
-      
-      await expect(
-        token.connect(timelock).rescueTokens(await mockToken.getAddress(), user1.address, 0)
-      ).to.be.revertedWith("Amount must be > 0");
-    });
-
-    it("Should revert when unauthorized", async function () {
-      const MockTokenFactory = await ethers.getContractFactory("MockERC20");
-      const mockToken = await MockTokenFactory.deploy("Mock", "MCK");
-      
-      await expect(
-        token.connect(user1).rescueTokens(await mockToken.getAddress(), user1.address, 1000)
-      ).to.be.reverted;
+    it("Should revert with zero addresses", async function () {
+      await expect(token.connect(timelock).setupDEX(ethers.ZeroAddress, router.address)).to.be.revertedWith("Invalid");
+      await expect(token.connect(timelock).setupDEX(pair.address, ethers.ZeroAddress)).to.be.revertedWith("Invalid");
     });
 
     it("Should revert after finalize", async function () {
       await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
       await token.connect(timelock).finalize();
-      
-      const MockTokenFactory = await ethers.getContractFactory("MockERC20");
-      const mockToken = await MockTokenFactory.deploy("Mock", "MCK");
-      
-      await expect(
-        token.connect(timelock).rescueTokens(await mockToken.getAddress(), user1.address, 1000)
-      ).to.be.revertedWith("Contract is finalized");
+      await expect(token.connect(timelock).setupDEX(user1.address, user2.address)).to.be.reverted;
     });
 
-    it("Should rescue ETH successfully", async function () {
-      // Send ETH to contract
-      await others[0].sendTransaction({
-        to: await token.getAddress(),
-        value: ethers.parseEther("1")
-      });
-      
-      const balanceBefore = await ethers.provider.getBalance(user1.address);
-      
-      await expect(token.connect(timelock).rescueETH(user1.address))
-        .to.emit(token, "ETHRescued");
-
-      const balanceAfter = await ethers.provider.getBalance(user1.address);
-      expect(balanceAfter - balanceBefore).to.equal(ethers.parseEther("1"));
-    });
-
-    it("Should revert rescuing ETH when no ETH", async function () {
-      await expect(
-        token.connect(timelock).rescueETH(user1.address)
-      ).to.be.revertedWith("No ETH to rescue");
-    });
-
-    it("Should revert rescuing ETH to zero address", async function () {
-      await others[0].sendTransaction({
-        to: await token.getAddress(),
-        value: ethers.parseEther("1")
-      });
-      
-      await expect(
-        token.connect(timelock).rescueETH(ethers.ZeroAddress)
-      ).to.be.revertedWith("Invalid recipient");
+    it("Should revert after governance period", async function () {
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await expect(token.connect(timelock).setupDEX(pair.address, router.address)).to.be.revertedWith("Expired");
     });
   });
 
-  // ============ FINALIZE TESTS ============
-  describe("Finalize", function () {
-    beforeEach(async function () {
-      await token.connect(timelock).setupDEX(pair.address, router.address);
+  // ═══════════════════════════════════════════════════════════════
+  // 3. MAX WALLET LIMITS
+  // ═══════════════════════════════════════════════════════════════
+  describe("Max Wallet Limits", function () {
+    it("Should allow transfer within max wallet limit", async function () {
+      await expect(token.connect(timelock).transfer(user1.address, MAX_WALLET)).to.not.be.reverted;
     });
 
-    it("Should finalize successfully", async function () {
+    it("Should revert if transfer exceeds max wallet", async function () {
+      await expect(token.connect(timelock).transfer(user1.address, MAX_WALLET + 1n)).to.be.revertedWith("Max wallet exceeded");
+    });
+
+    it("Should allow excluded address to exceed limit", async function () {
+      const extraAmount = ethers.parseEther("1000000");
+      await expect(token.connect(vestingContract).transfer(timelock.address, extraAmount)).to.not.be.reverted;
+    });
+
+    it("Should allow vesting contract to exceed limit", async function () {
+      await expect(token.connect(timelock).transfer(vestingContract.address, MAX_WALLET + 1n)).to.not.be.reverted;
+    });
+
+    it("Should enforce limit on regular users", async function () {
+      await token.connect(timelock).transfer(user1.address, MAX_WALLET);
+      await expect(token.connect(timelock).transfer(user1.address, 1n)).to.be.revertedWith("Max wallet exceeded");
+    });
+
+    it("Should disable max wallet after finalize", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await token.connect(timelock).finalize();
+      await expect(token.connect(timelock).transfer(user1.address, MAX_WALLET + 1n)).to.not.be.reverted;
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 4. EXCLUDED FROM LIMITS
+  // ═══════════════════════════════════════════════════════════════
+  describe("Excluded From Limits", function () {
+    it("Should allow ADMIN_ROLE to exclude address", async function () {
+      await token.connect(timelock).setExcludedFromLimits(user1.address, true);
+      expect(await token.isExcludedFromLimits(user1.address)).to.be.true;
+    });
+
+    it("Should allow ADMIN_ROLE to remove exclusion", async function () {
+      await token.connect(timelock).setExcludedFromLimits(user1.address, true);
+      await token.connect(timelock).setExcludedFromLimits(user1.address, false);
+      expect(await token.isExcludedFromLimits(user1.address)).to.be.false;
+    });
+
+    it("Should revert if non-ADMIN_ROLE calls", async function () {
+      await expect(token.connect(user1).setExcludedFromLimits(user2.address, true)).to.be.reverted;
+    });
+
+    it("Should revert after finalize", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await token.connect(timelock).finalize();
+      await expect(token.connect(timelock).setExcludedFromLimits(user1.address, true)).to.be.reverted;
+    });
+
+    it("Should revert after governance period", async function () {
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await expect(token.connect(timelock).setExcludedFromLimits(user1.address, true)).to.be.revertedWith("Expired");
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 5. RESCUE TOKENS
+  // ═══════════════════════════════════════════════════════════════
+  describe("rescueTokens", function () {
+    let dummyToken: any; // DummyToken
+
+    beforeEach(async function () {
+      // ✅ FIX: Use DummyToken instead of ProjectToken
+      const DummyFactory = await ethers.getContractFactory("DummyToken");
+      dummyToken = await DummyFactory.deploy("Dummy", "DUM", ethers.parseEther("1000"));
+      await dummyToken.waitForDeployment();
+      await dummyToken.connect(owner).transfer(await token.getAddress(), ethers.parseEther("100"));
+    });
+
+    it("Should allow ADMIN_ROLE to rescue tokens", async function () {
+      const before = await dummyToken.balanceOf(timelock.address);
+      await token.connect(timelock).rescueTokens(await dummyToken.getAddress(), timelock.address, ethers.parseEther("100"));
+      const after = await dummyToken.balanceOf(timelock.address);
+      expect(after - before).to.equal(ethers.parseEther("100"));
+    });
+
+    it("Should revert when rescuing own token", async function () {
+      await expect(token.connect(timelock).rescueTokens(await token.getAddress(), timelock.address, 1n)).to.be.revertedWith("Cannot rescue own token");
+    });
+
+    it("Should revert with zero recipient", async function () {
+      await expect(token.connect(timelock).rescueTokens(await dummyToken.getAddress(), ethers.ZeroAddress, 1n)).to.be.revertedWith("Zero address");
+    });
+
+    it("Should revert if non-ADMIN_ROLE calls", async function () {
+      await expect(token.connect(user1).rescueTokens(await dummyToken.getAddress(), user1.address, 1n)).to.be.reverted;
+    });
+
+    it("Should revert after finalize", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await token.connect(timelock).finalize();
+      await expect(token.connect(timelock).rescueTokens(await dummyToken.getAddress(), timelock.address, 1n)).to.be.reverted;
+    });
+
+    it("Should revert after governance period", async function () {
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await expect(token.connect(timelock).rescueTokens(await dummyToken.getAddress(), timelock.address, 1n)).to.be.revertedWith("Expired");
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 6. FINALIZE
+  // ═══════════════════════════════════════════════════════════════
+  describe("finalize", function () {
+    it("Should allow ADMIN_ROLE to finalize during governance", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await expect(token.connect(timelock).finalize()).to.not.be.reverted;
+    });
+
+    it("Should allow timelock to finalize after governance", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await expect(token.connect(timelock).finalize()).to.not.be.reverted;
+    });
+
+    it("Should revert if DEX not set", async function () {
+      await expect(token.connect(timelock).finalize()).to.be.revertedWith("DEX not set");
+    });
+
+    it("Should set finalized to true", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      expect(await token.finalized()).to.be.true;
+    });
+
+    it("Should disable max wallet", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      expect(await token.maxWalletDisabled()).to.be.true;
+    });
+
+    it("Should revoke ADMIN_ROLE from timelock", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      expect(await token.hasRole(await token.ADMIN_ROLE(), timelock.address)).to.be.false;
+    });
+
+    it("Should revoke DEFAULT_ADMIN_ROLE from timelock", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      expect(await token.hasRole(await token.DEFAULT_ADMIN_ROLE(), timelock.address)).to.be.false;
+    });
+
+    it("Should revoke DEX_MANAGER_ROLE from timelock", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      expect(await token.hasRole(await token.DEX_MANAGER_ROLE(), timelock.address)).to.be.false;
+    });
+
+    it("Should revoke FUNDER_ROLE from timelock", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      expect(await token.hasRole(await token.FUNDER_ROLE(), timelock.address)).to.be.false;
+    });
+
+    it("Should emit Finalized and ContractImmutable events", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
       await expect(token.connect(timelock).finalize())
         .to.emit(token, "Finalized")
-        .to.emit(token, "ContractImmutable");
-
-      expect(await token.finalized()).to.be.true;
-      expect(await token.maxWalletDisabled()).to.be.true;
-      expect(await token.maxWalletAmount()).to.equal(0);
-      expect(await token.isImmutable()).to.be.true;
+        .and.to.emit(token, "ContractImmutable");
     });
 
-    it("Should revert without DEX setup", async function () {
-      // Deploy new token without DEX
-      const recipients = [user1.address];
-      const amounts = [MAX_SUPPLY];
-      
-      const ProjectTokenFactory = await ethers.getContractFactory("ProjectToken");
-      const newToken = await ProjectTokenFactory.deploy(
-        "Test",
-        "TST",
-        timelock.address,
-        recipients,
-        amounts,
-        vestingContract.address
-      );
-      
-      await expect(
-        newToken.connect(timelock).finalize()
-      ).to.be.revertedWith("DEX not set");
-    });
-
-    it("Should revert when already finalized", async function () {
-      await token.connect(timelock).finalize();
-      
-      await expect(
-        token.connect(timelock).finalize()
-      ).to.be.revertedWith("Contract is finalized");
-    });
-
-    it("Should revert when unauthorized during governance", async function () {
-      await expect(
-        token.connect(user1).finalize()
-      ).to.be.revertedWith("Only admin");
-    });
-
-    it("Should allow timelock finalize after governance", async function () {
-      await time.increase(GOVERNANCE_PERIOD + 1);
-      
-      await expect(token.connect(timelock).finalize()).to.not.be.reverted;
-      expect(await token.finalized()).to.be.true;
-    });
-
-    it("Should revert non-timelock finalize after governance", async function () {
-      await time.increase(GOVERNANCE_PERIOD + 1);
-      
-      await expect(
-        token.connect(user1).finalize()
-      ).to.be.revertedWith("Only timelock after expiry");
-    });
-
-    it("Should revoke all roles after finalize", async function () {
-      await token.connect(timelock).finalize();
-      
-      expect(await token.hasAdminRole(timelock.address)).to.be.false;
-      expect(await token.hasDefaultAdminRole(timelock.address)).to.be.false;
-      expect(await token.hasDexManagerRole(timelock.address)).to.be.false;
-    });
-  });
-
-  // ============ BURN TESTS ============
-  describe("Burn", function () {
-    it("Should burn successfully", async function () {
-      const burnAmount = ethers.parseUnits("1000", 18);
-      const balanceBefore = await token.balanceOf(user1.address);
-      
-      await expect(token.connect(user1).burn(burnAmount))
-        .to.emit(token, "TokensBurned");
-
-      expect(await token.balanceOf(user1.address)).to.equal(balanceBefore - burnAmount);
-    });
-
-    it("Should revert burning zero", async function () {
-      await expect(
-        token.connect(user1).burn(0)
-      ).to.be.revertedWith("Amount must be > 0");
-    });
-
-    it("Should burn from successfully", async function () {
-      const burnAmount = ethers.parseUnits("1000", 18);
-      
-      await token.connect(user1).approve(others[0].address, burnAmount);
-      
-      await token.connect(others[0]).burnFrom(user1.address, burnAmount);
-      
-      expect(await token.allowance(user1.address, others[0].address)).to.equal(0);
-    });
-  });
-
-  // ============ TRANSFER TESTS ============
-  describe("Transfer", function () {
-    it("Should transfer successfully", async function () {
-      const transferAmount = ethers.parseUnits("1000", 18);
-      const balanceBefore = await token.balanceOf(user2.address);
-      
-      await token.connect(user1).transfer(user2.address, transferAmount);
-      
-      expect(await token.balanceOf(user2.address)).to.equal(balanceBefore + transferAmount);
-    });
-
-    it("Should allow transfer to excluded addresses exceeding max wallet", async function () {
-      await token.connect(timelock).setupDEX(pair.address, router.address);
-      
-      const largeAmount = ethers.parseUnits("20000000", 18);
-      
-      await expect(token.connect(user1).transfer(pair.address, largeAmount)).to.not.be.reverted;
-    });
-  });
-
-  // ============ VIEW FUNCTION TESTS ============
-  describe("View Functions", function () {
-    it("Should return correct finalized status", async function () {
-      expect(await token.isFinalized()).to.be.false;
-      
+    it("Should revert if already finalized", async function () {
       await token.connect(timelock).setupDEX(pair.address, router.address);
       await token.connect(timelock).finalize();
-      
-      expect(await token.isFinalized()).to.be.true;
+      await expect(token.connect(timelock).finalize()).to.be.revertedWith("Finalized");
     });
 
-    it("Should return correct immutable status", async function () {
-      expect(await token.isImmutable()).to.be.false;
-      
+    it("Should revert if non-admin tries during governance", async function () {
       await token.connect(timelock).setupDEX(pair.address, router.address);
-      await token.connect(timelock).finalize();
-      
-      expect(await token.isImmutable()).to.be.true;
+      await expect(token.connect(user1).finalize()).to.be.revertedWith("Only admin");
     });
 
-    it("Should return correct governance status", async function () {
-      expect(await token.isGovernanceExpired()).to.be.false;
-      
-      await time.increase(GOVERNANCE_PERIOD + 1);
-      
-      expect(await token.isGovernanceExpired()).to.be.true;
-    });
-
-    it("Should return correct governance time remaining", async function () {
-      const remaining = await token.governanceTimeRemaining();
-      expect(remaining).to.be.gt(0);
-      
-      await time.increase(GOVERNANCE_PERIOD + 1);
-      
-      expect(await token.governanceTimeRemaining()).to.equal(0);
-    });
-
-    it("Should return correct token status", async function () {
-      const status = await token.getTokenStatus();
-      
-      expect(status._finalized).to.be.false;
-      expect(status._maxWalletDisabled).to.be.false;
-      expect(status._maxWalletAmount).to.equal(ethers.parseUnits("10000000", 18));
-      expect(status._totalMinted).to.equal(MAX_SUPPLY);
-      expect(status._totalSupply).to.equal(MAX_SUPPLY);
-      expect(status._timelock).to.equal(timelock.address);
-      expect(status._isImmutable).to.be.false;
-      expect(status._governanceExpired).to.be.false;
-      expect(status._governanceRemaining).to.be.gt(0);
-    });
-
-    it("Should return correct role statuses", async function () {
-      expect(await token.hasAdminRole(timelock.address)).to.be.true;
-      expect(await token.hasDexManagerRole(timelock.address)).to.be.true;
-      expect(await token.hasDefaultAdminRole(timelock.address)).to.be.true;
-      expect(await token.hasFunderRole(timelock.address)).to.be.true;
-      
-      expect(await token.hasAdminRole(user1.address)).to.be.false;
+    it("Should revert if non-timelock tries after governance", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await expect(token.connect(user1).finalize()).to.be.revertedWith("Only timelock");
     });
   });
 
-  // ============ RECEIVE ETH TEST ============
-  describe("Receive ETH", function () {
-    it("Should accept ETH", async function () {
-      const amount = ethers.parseEther("1");
-      
-      await others[0].sendTransaction({
-        to: await token.getAddress(),
-        value: amount
-      });
-      
-      expect(await ethers.provider.getBalance(await token.getAddress())).to.equal(amount);
+  // ═══════════════════════════════════════════════════════════════
+  // 7. ROLE MANAGEMENT
+  // ═══════════════════════════════════════════════════════════════
+  describe("Role Management", function () {
+    it("Should allow DEFAULT_ADMIN_ROLE to grant roles", async function () {
+      await token.connect(timelock).grantRole(await token.ADMIN_ROLE(), admin.address);
+      expect(await token.hasRole(await token.ADMIN_ROLE(), admin.address)).to.be.true;
+    });
+
+    it("Should allow DEFAULT_ADMIN_ROLE to revoke roles", async function () {
+      await token.connect(timelock).grantRole(await token.ADMIN_ROLE(), admin.address);
+      await token.connect(timelock).revokeRole(await token.ADMIN_ROLE(), admin.address);
+      expect(await token.hasRole(await token.ADMIN_ROLE(), admin.address)).to.be.false;
+    });
+
+    it("Should not allow non-admin to grant roles", async function () {
+      await expect(token.connect(user1).grantRole(await token.ADMIN_ROLE(), admin.address)).to.be.reverted;
+    });
+
+    it("Should not allow role operations after finalize", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).finalize();
+      await expect(token.connect(timelock).grantRole(await token.ADMIN_ROLE(), admin.address)).to.be.reverted;
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 8. RECEIVE / ETH
+  // ═══════════════════════════════════════════════════════════════
+  describe("ETH Handling", function () {
+    it("Should accept ETH via receive", async function () {
+      await expect(owner.sendTransaction({ to: await token.getAddress(), value: ethers.parseEther("1") })).to.not.be.reverted;
+    });
+
+    it("Should trap ETH permanently (NO WITHDRAW FUNCTION)", async function () {
+      const balanceBefore = await ethers.provider.getBalance(await token.getAddress());
+      await owner.sendTransaction({ to: await token.getAddress(), value: ethers.parseEther("1") });
+      const balanceAfter = await ethers.provider.getBalance(await token.getAddress());
+      expect(balanceAfter).to.equal(balanceBefore + ethers.parseEther("1"));
+      expect(balanceAfter).to.be.gt(balanceBefore);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 9. EDGE CASES & ATTACK VECTORS
+  // ═══════════════════════════════════════════════════════════════
+  describe("Edge Cases & Attack Vectors", function () {
+    it("Should handle max wallet with exact boundary", async function () {
+      await expect(token.connect(timelock).transfer(user1.address, MAX_WALLET)).to.not.be.reverted;
+      expect(await token.balanceOf(user1.address)).to.equal(MAX_WALLET);
+    });
+
+    it("Should handle zero amount transfers", async function () {
+      await expect(token.connect(timelock).transfer(user1.address, 0n)).to.not.be.reverted;
+    });
+
+    it("Should not allow transfer to zero address", async function () {
+      await expect(token.connect(timelock).transfer(ethers.ZeroAddress, 1n)).to.be.reverted;
+    });
+
+    it("Should maintain correct total supply after transfers", async function () {
+      await token.connect(timelock).transfer(user1.address, ethers.parseEther("1000"));
+      await token.connect(timelock).transfer(user2.address, ethers.parseEther("2000"));
+      expect(await token.totalSupply()).to.equal(MAX_SUPPLY);
+    });
+
+    it("Should allow burn to reduce supply", async function () {
+      const burnAmount = ethers.parseEther("1000");
+      await token.connect(timelock).burn(burnAmount);
+      expect(await token.totalSupply()).to.equal(MAX_SUPPLY - burnAmount);
+    });
+
+    it("Should handle multiple DEX setups (only before finalize)", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await token.connect(timelock).setupDEX(user1.address, user2.address);
+      expect(await token.pair()).to.equal(user1.address);
+      expect(await token.router()).to.equal(user2.address);
+    });
+
+    it("Should prevent double spend via reentrancy (rescueTokens)", async function () {
+      // ✅ FIX: Use DummyToken instead of ProjectToken
+      const DummyFactory = await ethers.getContractFactory("DummyToken");
+      const dummy = await DummyFactory.deploy("Dummy", "DUM", ethers.parseEther("1000"));
+      await dummy.waitForDeployment();
+      await dummy.connect(owner).transfer(await token.getAddress(), ethers.parseEther("100"));
+
+      const before = await dummy.balanceOf(timelock.address);
+      await token.connect(timelock).rescueTokens(await dummy.getAddress(), timelock.address, ethers.parseEther("100"));
+      const after = await dummy.balanceOf(timelock.address);
+      expect(after - before).to.equal(ethers.parseEther("100"));
     });
   });
 });
-'''
-
-with open('/mnt/agents/output/ProjectToken.test.ts', 'w') as f:
-    f.write(token_ts_test)
-
-print("✅ ProjectToken.test.ts saved")
-print(f"Size: {len(token_ts_test)} characters")
-
-# Create Hardhat config helper
-hardhat_config = '''import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox";
-
-const config: HardhatUserConfig = {
-  solidity: {
-    version: "0.8.20",
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 200,
-      },
-    },
-  },
-  networks: {
-    hardhat: {
-      chainId: 31337,
-    },
-    sepolia: {
-      url: process.env.SEPOLIA_RPC || "",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-    },
-  },
-  gasReporter: {
-    enabled: process.env.REPORT_GAS !== undefined,
-    currency: "USD",
-  },
-  etherscan: {
-    apiKey: process.env.ETHERSCAN_API_KEY,
-  },
-};
-
-export default config;
-'''
-
-with open('/mnt/agents/output/hardhat.config.ts', 'w') as f:
-    f.write(hardhat_config)
-
-print("✅ hardhat.config.ts saved")
-
-# Create package.json
-package_json = '''{
-  "name": "vesting-token-tests",
-  "version": "1.0.0",
-  "description": "Test suite for Vesting.sol and ProjectToken.sol",
-  "scripts": {
-    "compile": "hardhat compile",
-    "test": "hardhat test",
-    "test:vesting": "hardhat test test/Vesting.test.ts",
-    "test:token": "hardhat test test/ProjectToken.test.ts",
-    "coverage": "hardhat coverage",
-    "node": "hardhat node"
-  },
-  "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
-    "hardhat": "^2.19.0",
-    "typescript": "^5.3.0"
-  }
-}

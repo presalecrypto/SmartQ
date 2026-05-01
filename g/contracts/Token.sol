@@ -36,6 +36,7 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
     event AddressExcluded(address indexed account, bool excluded);
     event Finalized();
     event ContractImmutable();
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
     modifier onlyBeforeFinalize() {
         require(!finalized, "Finalized");
@@ -61,16 +62,20 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         _grantRole(DEX_MANAGER_ROLE, _timelock);
         _grantRole(FUNDER_ROLE, _timelock);
 
+
+        isExcludedFromLimits[_timelock] = true;
+        emit AddressExcluded(_timelock, true);
+
+
         // ✅ Vesting support
         if (_vestingContract != address(0)) {
             vestingContract = _vestingContract;
-
             _grantRole(FUNDER_ROLE, _vestingContract); // 🔥 FIX
-
             isExcludedFromLimits[_vestingContract] = true;
             emit AddressExcluded(_vestingContract, true);
         }
 
+        
         for (uint256 i = 0; i < recipients.length; i++) {
             require(recipients[i] != address(0), "Zero address");
             require(recipients[i].code.length == 0, "No contracts");
@@ -85,8 +90,6 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
 
         maxWalletAmount = 10_000_000 * 10**18;
 
-        isExcludedFromLimits[_timelock] = true;
-        emit AddressExcluded(_timelock, true);
     }
 
     function _checkGovernance() internal view {
@@ -148,6 +151,27 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         require(to != address(0), "Zero address");
 
         IERC20(tokenAddr).safeTransfer(to, amount);
+        emit TokensRescued(tokenAddr, to, amount); 
+
+    }
+
+    function withdrawETH(address to) 
+    external 
+    onlyRole(ADMIN_ROLE) 
+    onlyBeforeFinalize
+    nonReentrant 
+    {
+    _checkGovernance();
+
+    require(to != address(0), "Invalid recipient");
+
+    uint256 balance = address(this).balance;
+    require(balance > 0, "No ETH");
+
+    (bool success, ) = to.call{value: balance}("");
+    require(success, "Transfer failed");
+
+    
     }
 
     function finalize() external onlyBeforeFinalize {
