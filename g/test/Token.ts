@@ -266,6 +266,12 @@ describe("ProjectToken — Full Security Audit Test Suite", function () {
       expect(after - before).to.equal(ethers.parseEther("100"));
     });
 
+    it("Should emit TokensRescued event", async function () {
+      await expect(token.connect(timelock).rescueTokens(await dummyToken.getAddress(), timelock.address, ethers.parseEther("100")))
+        .to.emit(token, "TokensRescued")
+        .withArgs(await dummyToken.getAddress(), timelock.address, ethers.parseEther("100"));
+    });
+
     it("Should revert when rescuing own token", async function () {
       await expect(token.connect(timelock).rescueTokens(await token.getAddress(), timelock.address, 1n)).to.be.revertedWith("Cannot rescue own token");
     });
@@ -405,12 +411,36 @@ describe("ProjectToken — Full Security Audit Test Suite", function () {
       await expect(owner.sendTransaction({ to: await token.getAddress(), value: ethers.parseEther("1") })).to.not.be.reverted;
     });
 
-    it("Should trap ETH permanently (NO WITHDRAW FUNCTION)", async function () {
-      const balanceBefore = await ethers.provider.getBalance(await token.getAddress());
+    it("Should allow ADMIN_ROLE to withdraw ETH", async function () {
       await owner.sendTransaction({ to: await token.getAddress(), value: ethers.parseEther("1") });
-      const balanceAfter = await ethers.provider.getBalance(await token.getAddress());
-      expect(balanceAfter).to.equal(balanceBefore + ethers.parseEther("1"));
-      expect(balanceAfter).to.be.gt(balanceBefore);
+      const before = await ethers.provider.getBalance(timelock.address);
+      await token.connect(timelock).withdrawETH(timelock.address);
+      const after = await ethers.provider.getBalance(timelock.address);
+      expect(after).to.be.gt(before);
+    });
+
+    it("Should revert withdrawETH with zero address", async function () {
+      await expect(token.connect(timelock).withdrawETH(ethers.ZeroAddress)).to.be.revertedWith("Invalid recipient");
+    });
+
+    it("Should revert withdrawETH with no ETH", async function () {
+      await expect(token.connect(timelock).withdrawETH(timelock.address)).to.be.revertedWith("No ETH");
+    });
+
+    it("Should revert withdrawETH after finalize", async function () {
+      await token.connect(timelock).setupDEX(pair.address, router.address);
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await token.connect(timelock).finalize();
+      await expect(token.connect(timelock).withdrawETH(timelock.address)).to.be.reverted;
+    });
+
+    it("Should revert withdrawETH after governance", async function () {
+      await time.increase(GOVERNANCE_PERIOD + 1n);
+      await expect(token.connect(timelock).withdrawETH(timelock.address)).to.be.revertedWith("Expired");
+    });
+
+    it("Should revert if non-ADMIN_ROLE calls withdrawETH", async function () {
+      await expect(token.connect(user1).withdrawETH(user1.address)).to.be.reverted;
     });
   });
 
@@ -461,6 +491,15 @@ describe("ProjectToken — Full Security Audit Test Suite", function () {
       await token.connect(timelock).rescueTokens(await dummy.getAddress(), timelock.address, ethers.parseEther("100"));
       const after = await dummy.balanceOf(timelock.address);
       expect(after - before).to.equal(ethers.parseEther("100"));
+
+          it("Should prevent reentrancy on withdrawETH", async function () {
+      await owner.sendTransaction({ to: await token.getAddress(), value: ethers.parseEther("1") });
+      // nonReentrant modifier prevents double withdrawal
+      await token.connect(timelock).withdrawETH(timelock.address);
+      // Second call should fail (no ETH left)
+      await expect(token.connect(timelock).withdrawETH(timelock.address)).to.be.revertedWith("No ETH");
+          });
+
     });
   });
 });
