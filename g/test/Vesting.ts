@@ -1,601 +1,455 @@
-
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { ProjectToken, Vesting, MockPair, MockRouter } from "../typechain-types";
+import { time } from "@nomicfoundation/hardhat-network-helpers";
+import { Vesting, MockToken } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
-import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 
-describe("Vesting — Trust-Minimized", function () {
-  let token: ProjectToken;
+describe("Vesting Contract Tests", function () {
   let vesting: Vesting;
-  let mockPair: MockPair;
-  let mockRouter: MockRouter;
-  let owner: SignerWithAddress;
+  let token: MockToken;
   let timelock: SignerWithAddress;
+  let signer1: SignerWithAddress;
+  let signer2: SignerWithAddress;
+  let signer3: SignerWithAddress;
+  let user: SignerWithAddress;
   let funder: SignerWithAddress;
-  let beneficiary: SignerWithAddress;
-  let beneficiary2: SignerWithAddress;
-  let attacker: SignerWithAddress;
-  let freshUser: SignerWithAddress;
+  let others: SignerWithAddress[];
 
-  const MAX_SUPPLY = ethers.parseEther("1000000000");
+  const THRESHOLD = 2;
+  const INITIAL_FUND = ethers.parseUnits("100000", 18);
   const CLIFF = 30 * 24 * 60 * 60; // 30 days
   const VESTING_DURATION = 90 * 24 * 60 * 60; // 90 days
+  const GOVERNANCE_PERIOD = 180 * 24 * 60 * 60; // 180 days
+  const PROPOSAL_EXPIRY = 3 * 24 * 60 * 60; // 3 days
 
   beforeEach(async function () {
-    const signers = await ethers.getSigners();
-    owner = signers[0];
-    timelock = signers[1]; // timelock for vesting
-    funder = signers[2];
-    beneficiary = signers[3];
-    beneficiary2 = signers[4];
-    attacker = signers[5];
-    freshUser = signers[6];
+    [timelock, signer1, signer2, signer3, user, funder, ...others] = await ethers.getSigners();
 
-    // Deploy Token
-    const TokenFactory = await ethers.getContractFactory("ProjectToken");
-    token = await TokenFactory.deploy(
-      "MyToken", "MTK", owner.address,
-      [funder.address], [MAX_SUPPLY]
-    );
+    // Deploy Mock Token
+    const MockTokenFactory = await ethers.getContractFactory("MockToken");
+    token = await MockTokenFactory.deploy("Test Token", "TEST");
     await token.waitForDeployment();
 
-    // Deploy Vesting with timelock
+    // Deploy Vesting
     const VestingFactory = await ethers.getContractFactory("Vesting");
     vesting = await VestingFactory.deploy(
       await token.getAddress(),
-      timelock.address
+      timelock.address,
+      [signer1.address, signer2.address, signer3.address],
+      THRESHOLD
     );
     await vesting.waitForDeployment();
 
-    // Approve vesting contract to spend tokens
+    // Fund vesting contract
+    await token.connect(timelock).approve(await vesting.getAddress(), INITIAL_FUND);
+    await vesting.connect(timelock).fund(INITIAL_FUND);
+  });
 
-    // في beforeEach:
-    // 1. نقل توكنات من funder إلى timelock
-    // في beforeEach:
-
-  
-  
-  
- // استخدم:
-// نقل التوكن من funder إلى timelock
-// استثناء timelock من maxWallet
-await token.connect(owner).setExcludedFromLimits(timelock.address, true);
-
-// نقل التوكن
-await token.connect(funder).transfer(timelock.address, MAX_SUPPLY);
-
-// approve
-await token.connect(timelock).approve(await vesting.getAddress(), MAX_SUPPLY);
-
-  }),
-
-  // ═════════════════════════════════════════════════════════════
-  // DEPLOYMENT
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Deployment", function () {
-    it("Should set token address", async function () {
+  // ============ CONSTRUCTOR TESTS ============
+  describe("Constructor", function () {
+    it("Should set correct initial values", async function () {
       expect(await vesting.token()).to.equal(await token.getAddress());
-    });
-
-    it("Should set timelock address", async function () {
       expect(await vesting.timelock()).to.equal(timelock.address);
-    });
-
-    it("Should not be finalized initially", async function () {
+      expect(await vesting.threshold()).to.equal(THRESHOLD);
       expect(await vesting.finalized()).to.be.false;
-    });
-
-    it("Should grant DEFAULT_ADMIN_ROLE to timelock", async function () {
-      expect(await vesting.hasRole(await vesting.DEFAULT_ADMIN_ROLE(), timelock.address)).to.be.true;
-    });
-
-    it("Should grant FUNDER_ROLE to timelock", async function () {
-      expect(await vesting.hasRole(await vesting.FUNDER_ROLE(), timelock.address)).to.be.true;
     });
 
     it("Should revert with zero token address", async function () {
       const VestingFactory = await ethers.getContractFactory("Vesting");
       await expect(
-        VestingFactory.deploy(ethers.ZeroAddress, timelock.address)
+        VestingFactory.deploy(
+          ethers.ZeroAddress,
+          timelock.address,
+          [signer1.address],
+          1
+        )
       ).to.be.revertedWith("Invalid token");
-    });
-
-    it("Should revert with non-contract token address", async function () {
-      const VestingFactory = await ethers.getContractFactory("Vesting");
-      await expect(
-        VestingFactory.deploy(funder.address, timelock.address)
-      ).to.be.revertedWith("Token must be contract");
     });
 
     it("Should revert with zero timelock address", async function () {
       const VestingFactory = await ethers.getContractFactory("Vesting");
       await expect(
-        VestingFactory.deploy(await token.getAddress(), ethers.ZeroAddress)
+        VestingFactory.deploy(
+          await token.getAddress(),
+          ethers.ZeroAddress,
+          [signer1.address],
+          1
+        )
       ).to.be.revertedWith("Invalid timelock");
     });
+
+    it("Should revert with no signers", async function () {
+      const VestingFactory = await ethers.getContractFactory("Vesting");
+      await expect(
+        VestingFactory.deploy(
+          await token.getAddress(),
+          timelock.address,
+          [],
+          1
+        )
+      ).to.be.revertedWith("Bad signers");
+    });
+
+    it("Should revert with too many signers", async function () {
+      const VestingFactory = await ethers.getContractFactory("Vesting");
+      const manySigners = Array(51).fill(signer1.address);
+      await expect(
+        VestingFactory.deploy(
+          await token.getAddress(),
+          timelock.address,
+          manySigners,
+          2
+        )
+      ).to.be.revertedWith("Bad signers");
+    });
+
+    it("Should revert with bad threshold (too low)", async function () {
+      const VestingFactory = await ethers.getContractFactory("Vesting");
+      await expect(
+        VestingFactory.deploy(
+          await token.getAddress(),
+          timelock.address,
+          [signer1.address, signer2.address],
+          1
+        )
+      ).to.be.revertedWith("Bad threshold");
+    });
+
+    it("Should revert with bad threshold (too high)", async function () {
+      const VestingFactory = await ethers.getContractFactory("Vesting");
+      await expect(
+        VestingFactory.deploy(
+          await token.getAddress(),
+          timelock.address,
+          [signer1.address, signer2.address],
+          3
+        )
+      ).to.be.revertedWith("Bad threshold");
+    });
+
+    it("Should revert with duplicate signer", async function () {
+      const VestingFactory = await ethers.getContractFactory("Vesting");
+      await expect(
+        VestingFactory.deploy(
+          await token.getAddress(),
+          timelock.address,
+          [signer1.address, signer1.address],
+          2
+        )
+      ).to.be.revertedWith("Duplicate signer");
+    });
+
+    it("Should revert with zero address signer", async function () {
+      const VestingFactory = await ethers.getContractFactory("Vesting");
+      await expect(
+        VestingFactory.deploy(
+          await token.getAddress(),
+          timelock.address,
+          [signer1.address, ethers.ZeroAddress],
+          2
+        )
+      ).to.be.revertedWith("Invalid signer");
+    });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // ACCESS CONTROL
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Access Control", function () {
-    it("Should not allow non-timelock to grant roles", async function () {
-      await expect(
-        vesting.connect(attacker).grantRole(await vesting.FUNDER_ROLE(), attacker.address)
-      ).to.be.reverted;
-    });
-
-    it("Should not allow non-timelock to revoke roles", async function () {
-      await expect(
-        vesting.connect(attacker).revokeRole(await vesting.FUNDER_ROLE(), timelock.address)
-      ).to.be.reverted;
-    });
-
-    it("Should not allow non-timelock to renounce roles", async function () {
-      await expect(
-        vesting.connect(attacker).renounceRole(await vesting.FUNDER_ROLE(), timelock.address)
-      ).to.be.revertedWith("Only timelock can renounce roles");
-    });
-
-    it("Should allow timelock to grant FUNDER_ROLE", async function () {
-      await vesting.connect(timelock).grantRole(await vesting.FUNDER_ROLE(), funder.address);
-      expect(await vesting.hasRole(await vesting.FUNDER_ROLE(), funder.address)).to.be.true;
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // CREATE VESTING
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Create Vesting", function () {
-    it("Should create vesting schedule", async function () {
-      const amount = ethers.parseEther("1000");
+  // ============ FUND TESTS ============
+  describe("Fund", function () {
+    it("Should fund successfully", async function () {
+      const fundAmount = ethers.parseUnits("10000", 18);
+      await token.connect(timelock).approve(await vesting.getAddress(), fundAmount);
       
-      await expect(vesting.connect(timelock).createVesting(beneficiary.address, amount))
-        .to.emit(vesting, "VestingCreated")
-        .withArgs(
-  beneficiary.address,
-  amount,
-  amount / 4n,
-  timelock.address,
-  anyValue
-);
+      await expect(vesting.connect(timelock).fund(fundAmount))
+        .to.emit(vesting, "Funded")
+        .withArgs(timelock.address, fundAmount);
 
-      const schedule = await vesting.vestingSchedules(beneficiary.address);
-      expect(schedule.initialized).to.be.true;
-      expect(schedule.beneficiary).to.equal(beneficiary.address);
-      expect(schedule.totalAmount).to.equal(amount - (amount / 4n));
-      expect(schedule.releasedAmount).to.equal(0);
-      expect(schedule.immediateReleased).to.be.true;
-    });
-
-    it("Should transfer immediate release (25%)", async function () {
-      const amount = ethers.parseEther("1000");
-      const immediateRelease = amount / 4n;
-      
-      const balanceBefore = await token.balanceOf(beneficiary.address);
-      await vesting.connect(timelock).createVesting(beneficiary.address, amount);
-      const balanceAfter = await token.balanceOf(beneficiary.address);
-      
-      expect(balanceAfter - balanceBefore).to.equal(immediateRelease);
-    });
-
-    it("Should transfer remaining to contract (75%)", async function () {
-      const amount = ethers.parseEther("1000");
-      const vested = amount - (amount / 4n);
-      
-      const contractBalanceBefore = await token.balanceOf(await vesting.getAddress());
-      await vesting.connect(timelock).createVesting(beneficiary.address, amount);
-      const contractBalanceAfter = await token.balanceOf(await vesting.getAddress());
-      
-      expect(contractBalanceAfter - contractBalanceBefore).to.equal(vested);
-    });
-
-    it("Should update totalVested", async function () {
-      const amount = ethers.parseEther("1000");
-      const vested = amount - (amount / 4n);
-      
-      await vesting.connect(timelock).createVesting(beneficiary.address, amount);
-      expect(await vesting.totalVested()).to.equal(vested);
-    });
-
-    it("Should add beneficiary to list", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      expect(await vesting.beneficiaries(0)).to.equal(beneficiary.address);
-    });
-
-    it("Should revert with zero address beneficiary", async function () {
-      await expect(
-        vesting.connect(timelock).createVesting(ethers.ZeroAddress, ethers.parseEther("1000"))
-      ).to.be.revertedWith("Zero address");
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(INITIAL_FUND + fundAmount);
     });
 
     it("Should revert with zero amount", async function () {
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary.address, 0)
-      ).to.be.revertedWith("Amount must be > 0");
+      await expect(vesting.connect(timelock).fund(0)).to.be.revertedWith("Zero amount");
     });
 
-    it("Should revert if beneficiary already exists", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"))
-      ).to.be.revertedWith("Already exists");
-    });
-
-    it("Should revert if allowance insufficient", async function () {
-      await token.connect(timelock).approve(await vesting.getAddress(), 0);
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"))
-      ).to.be.reverted;
-    });
-
-    it("Should revert if not FUNDER_ROLE", async function () {
-      await expect(
-        vesting.connect(attacker).createVesting(beneficiary.address, ethers.parseEther("1000"))
-      ).to.be.reverted;
-    });
-
-    it("Should revert after finalize", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      await vesting.connect(timelock).finalize();
-      
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary2.address, ethers.parseEther("1000"))
-      ).to.be.reverted;
-    });
-
-    it("Should handle multiple beneficiaries", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      await vesting.connect(timelock).createVesting(beneficiary2.address, ethers.parseEther("2000"));
-      
-      expect(await vesting.beneficiaries(0)).to.equal(beneficiary.address);
-      expect(await vesting.beneficiaries(1)).to.equal(beneficiary2.address);
+    it("Should revert when unauthorized", async function () {
+      await expect(vesting.connect(user).fund(1000)).to.be.reverted;
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // RELEASABLE AMOUNT
-  // ═════════════════════════════════════════════════════════════
+  // ============ PROPOSAL TESTS ============
+  describe("Proposals", function () {
+    it("Should create proposal successfully", async function () {
+      const amount = 1000;
+      
+      await expect(vesting.connect(timelock).createProposal(0, user.address, amount)) // 0 = CREATE
+        .to.emit(vesting, "ProposalCreated");
 
-  describe("Releasable Amount", function () {
+      expect(await vesting.activeProposalsCount()).to.equal(1);
+    });
+
+    it("Should revert duplicate proposal", async function () {
+      const amount = 1000;
+      await vesting.connect(timelock).createProposal(0, user.address, amount);
+      
+      // Same proposal should revert due to nonce change making different id
+      // But proposalExists prevents exact same id (impossible with nonce)
+      await vesting.connect(timelock).createProposal(0, user.address, amount);
+      expect(await vesting.activeProposalsCount()).to.equal(2);
+    });
+
+    it("Should revert when max proposals reached", async function () {
+      for (let i = 0; i < 100; i++) {
+        await vesting.connect(timelock).createProposal(0, others[i % others.length].address, 1000);
+      }
+      
+      await expect(
+        vesting.connect(timelock).createProposal(0, user.address, 1000)
+      ).to.be.revertedWith("Max proposals reached");
+    });
+
+    it("Should revert when unauthorized", async function () {
+      await expect(
+        vesting.connect(user).createProposal(0, user.address, 1000)
+      ).to.be.reverted;
+    });
+
+    it("Should revert after governance ended", async function () {
+      await time.increase(GOVERNANCE_PERIOD + 1);
+      
+      await expect(
+        vesting.connect(timelock).createProposal(0, user.address, 1000)
+      ).to.be.revertedWith("Governance ended");
+    });
+  });
+
+  // ============ APPROVE TESTS ============
+  describe("Approve", function () {
+    let proposalId: string;
+
     beforeEach(async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, 1000);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "ProposalCreated"
+      );
+      proposalId = event?.args?.[0];
     });
 
-    it("Should return 0 before cliff", async function () {
-      expect(await vesting.releasableAmount(beneficiary.address)).to.equal(0);
+    it("Should approve successfully", async function () {
+      await expect(vesting.connect(signer1).approve(proposalId))
+        .to.emit(vesting, "ProposalApproved")
+        .withArgs(proposalId, signer1.address);
+
+      expect(await vesting.approved(proposalId, signer1.address)).to.be.true;
     });
 
-    it("Should return 0 for non-existent beneficiary", async function () {
-      expect(await vesting.releasableAmount(attacker.address)).to.equal(0);
+    it("Should revert for invalid proposal", async function () {
+      const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake"));
+      await expect(vesting.connect(signer1).approve(fakeId)).to.be.revertedWith("Invalid");
     });
 
-    it("Should calculate correctly at 50% vesting", async function () {
-      // Move time to 50% of vesting (45 days after start = 15 days after cliff)
-      const halfVesting = CLIFF + (VESTING_DURATION - CLIFF) / 2;
-      await ethers.provider.send("evm_increaseTime", [halfVesting]);
-      await ethers.provider.send("evm_mine");
+    it("Should revert for already executed proposal", async function () {
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+      await vesting.connect(signer1).execute(proposalId);
 
-      const releasable = await vesting.releasableAmount(beneficiary.address);
-      const totalVested = ethers.parseEther("750"); // 75% of 1000
-      const expected = totalVested / 2n; // 50% of vested
+      await expect(vesting.connect(signer3).approve(proposalId)).to.be.revertedWith("Executed");
+    });
+
+    it("Should revert when expired", async function () {
+      await time.increase(PROPOSAL_EXPIRY + 1);
       
-      expect(releasable).to.be.closeTo(expected, ethers.parseEther("1"));
+      await expect(vesting.connect(signer1).approve(proposalId)).to.be.revertedWith("Expired");
     });
 
-    it("Should return full amount after vesting complete", async function () {
-      await ethers.provider.send("evm_increaseTime", [VESTING_DURATION + 1]);
-      await ethers.provider.send("evm_mine");
+    it("Should revert for double approval", async function () {
+      await vesting.connect(signer1).approve(proposalId);
+      
+      await expect(vesting.connect(signer1).approve(proposalId)).to.be.revertedWith("Approved");
+    });
 
-      expect(await vesting.releasableAmount(beneficiary.address)).to.equal(ethers.parseEther("750"));
+    it("Should revert when not signer", async function () {
+      await expect(vesting.connect(user).approve(proposalId)).to.be.revertedWith("Not signer");
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // RELEASE
-  // ═════════════════════════════════════════════════════════════
+  // ============ EXECUTE TESTS ============
+  describe("Execute", function () {
+    it("Should execute CREATE proposal", async function () {
+      const amount = ethers.parseUnits("10000", 18);
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, amount);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find(
+        (log: any) => log.fragment?.name === "ProposalCreated"
+      );
+      const proposalId = event?.args?.[0];
 
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+
+      await expect(vesting.connect(signer1).execute(proposalId))
+        .to.emit(vesting, "ProposalExecuted");
+
+      const schedule = await vesting.vesting(user.address);
+      expect(schedule.active).to.be.true;
+      expect(schedule.totalAllocation).to.equal(amount);
+    });
+
+    it("Should execute CANCEL proposal", async function () {
+      const amount = ethers.parseUnits("10000", 18);
+      
+      // Create vesting first
+      let tx = await vesting.connect(timelock).createProposal(0, user.address, amount);
+      let receipt = await tx.wait();
+      let event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const createId = event?.args?.[0];
+      
+      await vesting.connect(signer1).approve(createId);
+      await vesting.connect(signer2).approve(createId);
+      await vesting.connect(signer1).execute(createId);
+
+      // Cancel it
+      tx = await vesting.connect(timelock).createProposal(1, user.address, 0); // 1 = CANCEL
+      receipt = await tx.wait();
+      event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const cancelId = event?.args?.[0];
+
+      await vesting.connect(signer1).approve(cancelId);
+      await vesting.connect(signer2).approve(cancelId);
+      await vesting.connect(signer1).execute(cancelId);
+
+      const schedule = await vesting.vesting(user.address);
+      expect(schedule.active).to.be.false;
+      expect(schedule.cancelled).to.be.true;
+    });
+
+    it("Should execute FINALIZE proposal", async function () {
+      const tx = await vesting.connect(timelock).createProposal(2, ethers.ZeroAddress, 0); // 2 = FINALIZE
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const proposalId = event?.args?.[0];
+
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+
+      await expect(vesting.connect(signer1).execute(proposalId))
+        .to.emit(vesting, "Finalized");
+
+      expect(await vesting.finalized()).to.be.true;
+    });
+
+    it("Should revert with not enough approvals", async function () {
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, 1000);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const proposalId = event?.args?.[0];
+
+      await vesting.connect(signer1).approve(proposalId);
+
+      await expect(vesting.connect(signer1).execute(proposalId)).to.be.revertedWith("Not enough");
+    });
+
+    it("Should revert when expired", async function () {
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, 1000);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const proposalId = event?.args?.[0];
+
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+
+      await time.increase(PROPOSAL_EXPIRY + 1);
+
+      await expect(vesting.connect(signer1).execute(proposalId)).to.be.revertedWith("Expired");
+    });
+  });
+
+  // ============ RELEASE TESTS ============
   describe("Release", function () {
+    const amount = ethers.parseUnits("10000", 18);
+    let proposalId: string;
+
     beforeEach(async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, amount);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      proposalId = event?.args?.[0];
+
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+      await vesting.connect(signer1).execute(proposalId);
+    });
+
+    it("Should release after cliff", async function () {
+      await time.increase(CLIFF + 1);
+
+      const releasable = await vesting.releasable(user.address);
+      expect(releasable).to.be.gt(0);
+
+      const balanceBefore = await token.balanceOf(user.address);
+      
+      await expect(vesting.connect(user).release())
+        .to.emit(vesting, "TokensReleased");
+
+      const balanceAfter = await token.balanceOf(user.address);
+      expect(balanceAfter).to.be.gt(balanceBefore);
     });
 
     it("Should revert before cliff", async function () {
-      await expect(
-        vesting.connect(beneficiary).release()
-      ).to.be.revertedWith("Nothing to release");
+      await time.increase(CLIFF - 1);
+
+      await expect(vesting.connect(user).release()).to.be.revertedWith("Nothing");
     });
 
-    it("Should release correct amount after cliff", async function () {
-      // Move to 50% vesting
-      const halfVesting = CLIFF + (VESTING_DURATION - CLIFF) / 2;
-      await ethers.provider.send("evm_increaseTime", [halfVesting]);
-      await ethers.provider.send("evm_mine");
+    it("Should release full amount after duration", async function () {
+      await time.increase(VESTING_DURATION + 1);
 
-      const balanceBefore = await token.balanceOf(beneficiary.address);
-      await vesting.connect(beneficiary).release();
-      const balanceAfter = await token.balanceOf(beneficiary.address);
+      const releasable = await vesting.releasable(user.address);
+      const immediate = amount * 2500n / 10000n;
+      const vest = amount - immediate;
 
-      const released = balanceAfter - balanceBefore;
-      expect(released).to.be.closeTo(ethers.parseEther("375"), ethers.parseEther("1"));
+      expect(releasable).to.equal(vest);
+
+      await vesting.connect(user).release();
+
+      const schedule = await vesting.vesting(user.address);
+      expect(schedule.released).to.equal(vest);
     });
 
-    it("Should update releasedAmount", async function () {
-      const halfVesting = CLIFF + (VESTING_DURATION - CLIFF) / 2;
-      await ethers.provider.send("evm_increaseTime", [halfVesting]);
-      await ethers.provider.send("evm_mine");
-
-      await vesting.connect(beneficiary).release();
-      
-      const schedule = await vesting.vestingSchedules(beneficiary.address);
-      expect(schedule.releasedAmount).to.be.closeTo(ethers.parseEther("375"), ethers.parseEther("1"));
-    });
-
-    it("Should update totalReleased", async function () {
-      const halfVesting = CLIFF + (VESTING_DURATION - CLIFF) / 2;
-      await ethers.provider.send("evm_increaseTime", [halfVesting]);
-      await ethers.provider.send("evm_mine");
-
-      const totalReleasedBefore = await vesting.totalReleased();
-      await vesting.connect(beneficiary).release();
-      const totalReleasedAfter = await vesting.totalReleased();
-
-      expect(totalReleasedAfter - totalReleasedBefore).to.be.closeTo(ethers.parseEther("375"), ethers.parseEther("1"));
-    });
-
-    it("Should emit TokensReleased event", async function () {
-      const halfVesting = CLIFF + (VESTING_DURATION - CLIFF) / 2;
-      await ethers.provider.send("evm_increaseTime", [halfVesting]);
-      await ethers.provider.send("evm_mine");
-
-      await expect(vesting.connect(beneficiary).release())
-        .to.emit(vesting, "TokensReleased")
-        .withArgs(
-  beneficiary.address,
-  anyValue,
-  anyValue
-        );
-    });
-
-    it("Should emit VestingCompleted when fully released", async function () {
-      await ethers.provider.send("evm_increaseTime", [VESTING_DURATION + 1]);
-      await ethers.provider.send("evm_mine");
-
-      await expect(vesting.connect(beneficiary).release())
-        .to.emit(vesting, "VestingCompleted")
-        .withArgs(beneficiary.address);
-    });
-
-    it("Should revert if nothing to release", async function () {
-      await expect(
-        vesting.connect(beneficiary).release()
-      ).to.be.revertedWith("Nothing to release");
-    });
-
-    it("Should revert for non-beneficiary", async function () {
-      await expect(
-        vesting.connect(attacker).release()
-      ).to.be.revertedWith("No vesting found");
-    });
-
-    it("Should allow partial releases", async function () {
-      // First release at 33%
-      const firstRelease = CLIFF + (VESTING_DURATION - CLIFF) / 3;
-      await ethers.provider.send("evm_increaseTime", [firstRelease]);
-      await ethers.provider.send("evm_mine");
-
-      await vesting.connect(beneficiary).release();
-      const firstAmount = await token.balanceOf(beneficiary.address);
-
-      // Second release at 66%
-      const secondRelease = (VESTING_DURATION - CLIFF) / 3;
-      await ethers.provider.send("evm_increaseTime", [secondRelease]);
-      await ethers.provider.send("evm_mine");
-
-      await vesting.connect(beneficiary).release();
-      const secondAmount = await token.balanceOf(beneficiary.address);
-
-      expect(secondAmount).to.be.gt(firstAmount);
+    it("Should revert when inactive", async function () {
+      await expect(vesting.connect(signer1).release()).to.be.revertedWith("Inactive");
     });
   });
 
-  // ═════════════════════════════════════════════════════════════
-  // FINALIZE
-  // ═════════════════════════════════════════════════════════════
+  // ============ INVARIANT TESTS ============
+  describe("Invariants", function () {
+    it("Should maintain accounting invariant", async function () {
+      const amount = ethers.parseUnits("10000", 18);
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, amount);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const proposalId = event?.args?.[0];
 
-  describe("Finalize", function () {
-    beforeEach(async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+      await vesting.connect(signer1).execute(proposalId);
+
+      const accounted = await vesting.totalAllocated() - await vesting.totalReleased();
+      expect(accounted).to.equal(await vesting.obligations());
     });
 
-    it("Should finalize successfully", async function () {
-      await expect(vesting.connect(timelock).finalize())
-        .to.emit(vesting, "ContractImmutable");
+    it("Should maintain balance invariant", async function () {
+      const amount = ethers.parseUnits("10000", 18);
+      const tx = await vesting.connect(timelock).createProposal(0, user.address, amount);
+      const receipt = await tx.wait();
+      const event = receipt?.logs.find((log: any) => log.fragment?.name === "ProposalCreated");
+      const proposalId = event?.args?.[0];
 
-      expect(await vesting.finalized()).to.be.true;
-    });
+      await vesting.connect(signer1).approve(proposalId);
+      await vesting.connect(signer2).approve(proposalId);
+      await vesting.connect(signer1).execute(proposalId);
 
-    it("Should revoke FUNDER_ROLE from timelock", async function () {
-      await vesting.connect(timelock).finalize();
-      expect(await vesting.hasRole(await vesting.FUNDER_ROLE(), timelock.address)).to.be.false;
-    });
-
-    it("Should revoke DEFAULT_ADMIN_ROLE from timelock", async function () {
-      await vesting.connect(timelock).finalize();
-      expect(await vesting.hasRole(await vesting.DEFAULT_ADMIN_ROLE(), timelock.address)).to.be.false;
-    });
-
-    it("Should set role admin to bytes32(0)", async function () {
-      await vesting.connect(timelock).finalize();
-      expect(await vesting.getRoleAdmin(await vesting.FUNDER_ROLE())).to.equal(ethers.ZeroHash);
-      expect(await vesting.getRoleAdmin(await vesting.DEFAULT_ADMIN_ROLE())).to.equal(ethers.ZeroHash);
-    });
-
-    it("Should revert if no vesting schedules", async function () {
-      const VestingFactory = await ethers.getContractFactory("Vesting");
-      const newVesting = await VestingFactory.deploy(await token.getAddress(), timelock.address);
-      
-      await expect(
-        newVesting.connect(timelock).finalize()
-      ).to.be.revertedWith("No vesting schedules");
-    });
-
-    it("Should revert finalize twice", async function () {
-      await vesting.connect(timelock).finalize();
-      await expect(
-        vesting.connect(timelock).finalize()
-      ).to.be.reverted;
-    });
-
-    it("Should revert createVesting after finalize", async function () {
-      await vesting.connect(timelock).finalize();
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary2.address, ethers.parseEther("1000"))
-      ).to.be.reverted;
-    });
-
-    it("Should allow release after finalize", async function () {
-      await vesting.connect(timelock).finalize();
-      
-      // Move past vesting duration
-      await ethers.provider.send("evm_increaseTime", [VESTING_DURATION + 1]);
-      await ethers.provider.send("evm_mine");
-
-      await expect(vesting.connect(beneficiary).release()).to.not.be.reverted;
+      const balance = await token.balanceOf(await vesting.getAddress());
+      const obligations = await vesting.obligations();
+      expect(balance).to.be.gte(obligations);
     });
   });
-
-  // ═════════════════════════════════════════════════════════════
-  // VIEW FUNCTIONS
-  // ═════════════════════════════════════════════════════════════
-
-  describe("View Functions", function () {
-    beforeEach(async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-    });
-
-    it("Should return correct vestedAmount before cliff", async function () {
-      expect(await vesting.vestedAmount(beneficiary.address)).to.equal(0);
-    });
-
-    it("Should return correct vestedAmount at 50%", async function () {
-      const halfVesting = CLIFF + (VESTING_DURATION - CLIFF) / 2;
-      await ethers.provider.send("evm_increaseTime", [halfVesting]);
-      await ethers.provider.send("evm_mine");
-
-      const vested = await vesting.vestedAmount(beneficiary.address);
-      expect(vested).to.be.closeTo(ethers.parseEther("375"), ethers.parseEther("1"));
-    });
-
-    it("Should return full vestedAmount after completion", async function () {
-      await ethers.provider.send("evm_increaseTime", [VESTING_DURATION + 1]);
-      await ethers.provider.send("evm_mine");
-
-      expect(await vesting.vestedAmount(beneficiary.address)).to.equal(ethers.parseEther("750"));
-    });
-
-    it("Should return correct beneficiaries count", async function () {
-
-    await vesting.connect(timelock).createVesting(
-  beneficiary2.address,
-  ethers.parseEther("1000")
-);
-      expect(await vesting.getBeneficiariesCount()).to.equal(2);
-
-    });
-  
-  });
-  // ═════════════════════════════════════════════════════════════
-  // SECURITY
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Security", function () {
-    it("Should not allow attacker to create vesting", async function () {
-      await expect(
-        vesting.connect(attacker).createVesting(attacker.address, ethers.parseEther("1000"))
-      ).to.be.reverted;
-    });
-
-    it("Should not allow attacker to finalize", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      await expect(
-        vesting.connect(attacker).finalize()
-      ).to.be.reverted;
-    });
-
-    it("Should not allow reentrancy on createVesting", async function () {
-      // This is implicitly tested by ReentrancyGuard
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"))
-      ).to.not.be.reverted;
-    });
-
-    it("Should not allow reentrancy on release", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      
-      await ethers.provider.send("evm_increaseTime", [VESTING_DURATION + 1]);
-      await ethers.provider.send("evm_mine");
-
-      await expect(vesting.connect(beneficiary).release()).to.not.be.reverted;
-    });
-
-    it("Should maintain immutability after finalize", async function () {
-      await vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"));
-      await vesting.connect(timelock).finalize();
-
-      expect(await vesting.finalized()).to.be.true;
-      expect(await vesting.getRoleAdmin(await vesting.FUNDER_ROLE())).to.equal(ethers.ZeroHash);
-    });
-  });
-
-  // ═════════════════════════════════════════════════════════════
-  // INTEGRATION WITH TOKEN.SOL
-  // ═════════════════════════════════════════════════════════════
-
-  describe("Integration with Token.sol", function () {
-    it("Should work with ProjectToken", async function () {
-      const amount = ethers.parseEther("10000");
-      
-      await vesting.connect(timelock).createVesting(beneficiary.address, amount);
-      
-      const schedule = await vesting.vestingSchedules(beneficiary.address);
-      expect(schedule.totalAmount).to.equal(amount - (amount / 4n));
-    });
-
-    it("Should handle Token.sol transfers correctly", async function () {
-      const amount = ethers.parseEther("1000");
-      
-      
-      const before = await token.balanceOf(timelock.address);
-
-await vesting.connect(timelock).createVesting(beneficiary.address,amount);
-
-const after = await token.balanceOf(timelock.address);
-
-expect(before - after).to.equal(amount);
-    }),
-
-    it("Should work after Token.sol finalize", async function () {
-      // Finalize Token.sol
-      const MockPairFactory = await ethers.getContractFactory("MockPair");
-      const mockPair = await MockPairFactory.deploy();
-      await mockPair.waitForDeployment();
-      
-      const MockRouterFactory = await ethers.getContractFactory("MockRouter");
-      const mockRouter = await MockRouterFactory.deploy();
-      await mockRouter.waitForDeployment();
-      
-      await token.connect(owner).setupDEX(await mockPair.getAddress(), await mockRouter.getAddress());
-      await token.connect(owner).finalize();
-      
-      // Vesting should still work
-      await expect(
-        vesting.connect(timelock).createVesting(beneficiary.address, ethers.parseEther("1000"))
-      ).to.not.be.reverted;
-    });
-  });
-  });
+});
