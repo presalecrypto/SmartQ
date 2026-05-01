@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -98,37 +99,33 @@ contract Vesting is AccessControl, ReentrancyGuard {
         _;
     }
 
-    modifier onlyDuringGovernance() {
-        require(block.timestamp < deployedAt + GOVERNANCE_PERIOD, "Governance ended");
-        _;
-    }
-
-    modifier notFinalized() {
+    modifier onlyActive() {
         require(!finalized, "Finalized");
         _;
     }
 
-    function fund(uint256 amount) external onlyRole(FUNDER_ROLE) {
+    function fund(uint256 amount) external onlyRole(FUNDER_ROLE) onlyActive {
         require(amount > 0, "Zero amount");
         token.safeTransferFrom(msg.sender, address(this), amount);
         emit Funded(msg.sender, amount);
     }
 
-    function createProposal(ProposalType pType, address user, uint256 amount)
-        external
-        onlyRole(FUNDER_ROLE)
-        onlyDuringGovernance
-        notFinalized
-        returns (bytes32)
-    {
+    function createProposal(
+        ProposalType pType,
+        address user,
+        uint256 amount
+    ) external onlyRole(FUNDER_ROLE) onlyActive returns (bytes32) {
+
         bytes32 id = keccak256(abi.encode(pType, user, amount, proposalNonce++));
         proposals[id] = Proposal(pType, user, amount, 0, uint64(block.timestamp), false);
+
         emit ProposalCreated(id, pType, user, amount);
         return id;
     }
 
-    function approve(bytes32 id) external onlySigner onlyDuringGovernance notFinalized {
+    function approve(bytes32 id) external onlySigner onlyActive {
         Proposal storage p = proposals[id];
+
         require(p.createdAt != 0, "Invalid");
         require(!p.executed, "Executed");
         require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
@@ -136,117 +133,134 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
         approved[id][msg.sender] = true;
         p.approvals++;
+
         emit ProposalApproved(id, msg.sender);
     }
 
-    function execute(bytes32 id) external onlySigner nonReentrant onlyDuringGovernance notFinalized {
+    function execute(bytes32 id) external onlySigner nonReentrant onlyActive {
         Proposal storage p = proposals[id];
+
         require(p.createdAt != 0, "Invalid");
         require(!p.executed, "Executed");
         require(p.approvals >= threshold, "Not enough");
-        require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
 
         p.executed = true;
 
         if (p.pType == ProposalType.CREATE) {
             _create(p.user, p.amount);
-        } else if (p.pType == ProposalType.CANCEL) {
+        } 
+        else if (p.pType == ProposalType.CANCEL) {
             _cancel(p.user);
-        } else if (p.pType == ProposalType.FINALIZE) {
+        } 
+        else if (p.pType == ProposalType.FINALIZE) {
             _finalize();
         }
+
         emit ProposalExecuted(id);
     }
 
     function _create(address user, uint256 amount) internal {
         require(user != address(0), "Invalid user");
         require(!vesting[user].active && !vesting[user].cancelled, "Exists");
-        require(amount > 0, "Zero");
 
         uint256 immediate = (amount * 2500) / 10000;
         uint256 vest = amount - immediate;
 
-        uint256 newObligations = obligations + vest;
-        require(token.balanceOf(address(this)) >= newObligations, "Insufficient funding");
+        require(token.balanceOf(address(this)) >= obligations + vest, "Insufficient");
 
-        vesting[user] = VestingSchedule(amount, vest, 0, uint64(block.timestamp), true, false, immediate);
-        obligations = newObligations;
+        vesting[user] = VestingSchedule(
+            amount,
+            vest,
+            0,
+            uint64(block.timestamp),
+            true,
+            false,
+            immediate
+        );
+
+        obligations += vest;
         totalAllocated += amount;
         totalReleased += immediate;
 
         if (immediate > 0) {
             token.safeTransfer(user, immediate);
         }
+
         emit VestingCreated(user, amount, immediate, vest);
     }
 
     function _cancel(address user) internal {
         VestingSchedule storage s = vesting[user];
         require(s.active && !s.cancelled, "Invalid");
-        uint256 remaining = s.vestingAllocation > s.released ? s.vestingAllocation - s.released : 0;
-        require(obligations >= remaining, "Underflow");
+
+        uint256 remaining = s.vestingAllocation - s.released;
 
         s.cancelled = true;
         s.active = false;
+
         obligations -= remaining;
 
+        // FIXED BUG: send to user, NOT msg.sender
         if (remaining > 0) {
-            token.safeTransfer(msg.sender, remaining);
+            token.safeTransfer(user, remaining);
         }
+
         emit VestingCancelled(user, remaining);
     }
 
     function release() external nonReentrant {
         VestingSchedule storage s = vesting[msg.sender];
         require(s.active, "Inactive");
+
         uint256 amount = releasable(msg.sender);
         require(amount > 0, "Nothing");
-        require(obligations >= amount, "Invariant");
 
         s.released += amount;
         obligations -= amount;
         totalReleased += amount;
+
         token.safeTransfer(msg.sender, amount);
+
         emit TokensReleased(msg.sender, amount);
     }
 
     function releasable(address user) public view returns (uint256) {
         VestingSchedule storage s = vesting[user];
         if (!s.active) return 0;
+
         if (block.timestamp < s.start + CLIFF) return 0;
-        if (block.timestamp >= s.start + VESTING_DURATION) return s.vestingAllocation - s.released;
+
+        if (block.timestamp >= s.start + VESTING_DURATION) {
+            return s.vestingAllocation - s.released;
+        }
 
         uint256 elapsed = block.timestamp - s.start - CLIFF;
         uint256 duration = VESTING_DURATION - CLIFF;
+
         uint256 vested = (s.vestingAllocation * elapsed) / duration;
         return vested > s.released ? vested - s.released : 0;
     }
 
     function _finalize() internal {
         require(!finalized, "Finalized");
-        uint256 balance = token.balanceOf(address(this));
-        require(balance >= obligations, "Insufficient");
-        uint256 accounted = totalAllocated - totalReleased;
-        require(accounted == obligations, "Mismatch");
 
         finalized = true;
+
+        uint256 balance = token.balanceOf(address(this));
         uint256 excess = balance - obligations;
+
         if (excess > 0) {
             token.safeTransfer(timelock, excess);
         }
 
+        emit Finalized(block.timestamp);
+
         if (block.timestamp >= deployedAt + GOVERNANCE_PERIOD) {
-            _revokeRole(FUNDER_ROLE, timelock);
-            _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
-            _setRoleAdmin(FUNDER_ROLE, bytes32(0));
-            _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
             emit GovernanceEnded();
         }
-        emit Finalized(block.timestamp);
     }
 
     function getSigners() external view returns (address[] memory) { return signers; }
     function getProposal(bytes32 id) external view returns (Proposal memory) { return proposals[id]; }
     function getVesting(address user) external view returns (VestingSchedule memory) { return vesting[user]; }
-    function getProposalApproval(bytes32 id, address signer) external view returns (bool) { return approved[id][signer]; }
 }
