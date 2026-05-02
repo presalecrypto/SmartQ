@@ -3,6 +3,8 @@ import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
 import { ProjectToken, Airdrop } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
+import { MerkleTree } from "merkletreejs";
+import keccak256 from "keccak256";
 
 describe("Airdrop — Full Security Audit Test Suite", function () {
   let token: ProjectToken;
@@ -20,7 +22,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
 
   let merkleRoot: string;
   let claims: { address: string; amount: bigint }[] = [];
-  let leaves: string[] = [];
+  let leaves: Buffer[] = [];
+  let tree: MerkleTree;
 
   beforeEach(async function () {
     [owner, timelock, admin, user1, user2, user3, user4] = await ethers.getSigners();
@@ -42,70 +45,20 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
       { address: user3.address, amount: ethers.parseEther("3000") },
     ];
 
-    // Match contract EXACTLY: keccak256(abi.encodePacked(addr, amount))
+    // Build leaves matching contract: keccak256(abi.encodePacked(addr, amount))
     leaves = claims.map(c =>
-      ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [c.address, c.amount]))
+      keccak256(ethers.solidityPacked(["address", "uint256"], [c.address, c.amount]))
     );
-    leaves.sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
 
-    merkleRoot = _buildMerkleRoot(leaves);
+    // Build tree with sorted pairs (matches OpenZeppelin MerkleProof)
+    tree = new MerkleTree(leaves, keccak256, { sortPairs: true });
+    merkleRoot = tree.getHexRoot();
 
-    await token.connect(timelock).transfer(await airdrop.getAddress(), ethers.parseEther("10000"));
+    const total = claims.reduce((sum, c) => sum + c.amount, 0n);
+
+    await token.connect(timelock).transfer(await airdrop.getAddress(),total);
+
   });
-
-  // ── Sorted-pair Merkle tree (matches OpenZeppelin MerkleProof) ──
-  function _buildMerkleRoot(_leaves: string[]): string {
-    if (_leaves.length === 0) return ethers.ZeroHash;
-    if (_leaves.length === 1) return _leaves[0];
-
-    let level = [..._leaves];
-    while (level.length > 1) {
-      const nextLevel: string[] = [];
-      for (let i = 0; i < level.length; i += 2) {
-        const left = level[i];
-        const right = level[i + 1] || left;
-        nextLevel.push(_sortedHash(left, right));
-      }
-      level = nextLevel;
-    }
-    return level[0];
-  }
-
-  function _sortedHash(a: string, b: string): string {
-    // OpenZeppelin MerkleProof: sort pairs before hashing
-    if (BigInt(a) <= BigInt(b)) {
-      return ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [a, b]));
-    } else {
-      return ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [b, a]));
-    }
-  }
-
-  function _getProof(_leaves: string[], leafIndex: number): string[] {
-    const proof: string[] = [];
-    let index = leafIndex;
-    let level = [..._leaves];
-
-    while (level.length > 1) {
-      const nextLevel: string[] = [];
-      for (let i = 0; i < level.length; i += 2) {
-        const left = level[i];
-        const right = level[i + 1] || left;
-
-        if (i === index || i + 1 === index) {
-          if (index === i && level[i + 1]) {
-            proof.push(right);
-          } else if (index === i + 1) {
-            proof.push(left);
-          }
-        }
-
-        nextLevel.push(_sortedHash(left, right));
-      }
-      index = Math.floor(index / 2);
-      level = nextLevel;
-    }
-    return proof;
-  }
 
   describe("Deployment", function () {
     it("Should set correct token", async function () {
@@ -186,9 +139,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
 
     it("Should allow valid claim", async function () {
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
 
       const before = await token.balanceOf(user1.address);
       await expect(airdrop.connect(user1).claim(claim.amount, proof))
@@ -204,9 +156,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
     it("Should allow multiple users to claim", async function () {
       for (let i = 0; i < claims.length; i++) {
         const claim = claims[i];
-        const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-        const leafIndex = leaves.findIndex(l => l === leafHash);
-        const proof = _getProof(leaves, leafIndex);
+        const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+        const proof = tree.getHexProof(leaf);
         const user = [user1, user2, user3][i];
         await airdrop.connect(user).claim(claim.amount, proof);
       }
@@ -222,18 +173,16 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
 
     it("Should revert with wrong amount", async function () {
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await expect(airdrop.connect(user1).claim(ethers.parseEther("9999"), proof))
         .to.be.revertedWith("Invalid proof");
     });
 
     it("Should revert if already claimed", async function () {
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await airdrop.connect(user1).claim(claim.amount, proof);
       await expect(airdrop.connect(user1).claim(claim.amount, proof))
         .to.be.revertedWith("Already claimed");
@@ -241,9 +190,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
 
     it("Should revert if not in merkle tree", async function () {
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await expect(airdrop.connect(user4).claim(ethers.parseEther("1000"), proof))
         .to.be.revertedWith("Invalid proof");
     });
@@ -259,9 +207,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
     it("Should revert after deadline", async function () {
       await time.increase(86400 * 8);
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await expect(airdrop.connect(user1).claim(claim.amount, proof))
         .to.be.revertedWith("Expired");
     });
@@ -269,9 +216,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
     it("Should revert after deactivate", async function () {
       await airdrop.connect(timelock).deactivate();
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await expect(airdrop.connect(user1).claim(claim.amount, proof))
         .to.be.revertedWith("Disabled");
     });
@@ -279,9 +225,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
     it("Should revert after finalize", async function () {
       await _finalizeAirdrop();
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await expect(airdrop.connect(user1).claim(claim.amount, proof))
         .to.be.revertedWith("Finalized");
     });
@@ -351,9 +296,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
     it("Should revert if nothing left", async function () {
       for (let i = 0; i < claims.length; i++) {
         const claim = claims[i];
-        const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-        const leafIndex = leaves.findIndex(l => l === leafHash);
-        const proof = _getProof(leaves, leafIndex);
+        const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+        const proof = tree.getHexProof(leaf);
         const user = [user1, user2, user3][i];
         await airdrop.connect(user).claim(claim.amount, proof);
       }
@@ -437,7 +381,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
       const info = await airdrop.getInfo();
       expect(info.active).to.be.true;
       expect(info._finalized).to.be.false;
-      expect(info.remaining).to.equal(ethers.parseEther("10000"));
+      const total = claims.reduce((sum, c) => sum + c.amount, 0n);
+expect(info.remaining).to.equal(total);
       expect(info.claimed).to.equal(0);
       expect(info.timeLeft).to.be.gt(0);
     });
@@ -446,8 +391,6 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
       const deadline = (await time.latest()) + 86400 * 7;
       await airdrop.connect(timelock).setMerkleRoot(merkleRoot, deadline);
       await _finalizeAirdrop();
-      // After finalize, if deadline has not passed, contract still returns timeLeft > 0
-      // We just check that active is false
       const info = await airdrop.getInfo();
       expect(info.active).to.be.false;
       expect(info._finalized).to.be.true;
@@ -459,17 +402,17 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
       const deadline = (await time.latest()) + 86400 * 7;
       await airdrop.connect(timelock).setMerkleRoot(merkleRoot, deadline);
       const claim = claims[0];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [claim.address, claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await airdrop.connect(user1).claim(claim.amount, proof);
       await expect(airdrop.connect(user1).claim(claim.amount, proof)).to.be.revertedWith("Already claimed");
     });
 
     it("Should handle single user merkle tree", async function () {
       const singleClaim = { address: user1.address, amount: ethers.parseEther("5000") };
-      const singleLeaf = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [singleClaim.address, singleClaim.amount]));
-      const singleRoot = singleLeaf;
+      const singleLeaf = keccak256(ethers.solidityPacked(["address", "uint256"], [singleClaim.address, singleClaim.amount]));
+      const singleTree = new MerkleTree([singleLeaf], keccak256, { sortPairs: true });
+      const singleRoot = singleTree.getHexRoot();
 
       const deadline = (await time.latest()) + 86400 * 7;
       await airdrop.connect(timelock).setMerkleRoot(singleRoot, deadline);
@@ -484,9 +427,8 @@ describe("Airdrop — Full Security Audit Test Suite", function () {
       const deadline = (await time.latest()) + 86400 * 7;
       await airdrop.connect(timelock).setMerkleRoot(merkleRoot, deadline);
       const user2Claim = claims[1];
-      const leafHash = ethers.keccak256(ethers.solidityPacked(["address", "uint256"], [user2Claim.address, user2Claim.amount]));
-      const leafIndex = leaves.findIndex(l => l === leafHash);
-      const proof = _getProof(leaves, leafIndex);
+      const leaf = keccak256(ethers.solidityPacked(["address", "uint256"], [user2Claim.address, user2Claim.amount]));
+      const proof = tree.getHexProof(leaf);
       await expect(airdrop.connect(user1).claim(user2Claim.amount, proof)).to.be.revertedWith("Invalid proof");
     });
   });
