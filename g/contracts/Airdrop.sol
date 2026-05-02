@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 contract Airdrop is AccessControl, ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
     // ============ ROLES ============
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -111,6 +112,10 @@ contract Airdrop is AccessControl, ReentrancyGuard {
 
         permanentlyDisabled = true;
 
+        uint256 bal = token.balanceOf(address(this));
+        if (bal > 0) {
+        token.transfer(timelock, bal);
+
         emit Deactivated();
     }
 
@@ -131,10 +136,10 @@ contract Airdrop is AccessControl, ReentrancyGuard {
             "Invalid proof"
         );
 
+        token.safeTransfer(msg.sender, amount);
         hasClaimed[msg.sender] = true;
         totalClaimed += amount;
 
-        require(token.transfer(msg.sender, amount), "Transfer failed");
 
         emit Claimed(msg.sender, amount);
     }
@@ -151,6 +156,7 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         require(bal > 0, "Nothing left");
 
         token.transfer(timelock, bal);
+        finalized true;
 
         emit WithdrawRemaining(timelock, bal);
     }
