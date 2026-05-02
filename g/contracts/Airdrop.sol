@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -115,8 +116,9 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         uint256 bal = token.balanceOf(address(this));
         if (bal > 0) {
         token.transfer(timelock, bal);
-
+    }
         emit Deactivated();
+    
     }
 
     // ============ CLAIM ============
@@ -156,9 +158,16 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         require(bal > 0, "Nothing left");
 
         token.transfer(timelock, bal);
-        finalized true;
+        finalized = true;
 
-        emit WithdrawRemaining(timelock, bal);
+        _revokeRole(ADMIN_ROLE, timelock);
+        _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
+        _setRoleAdmin(ADMIN_ROLE, bytes32(0));
+        _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
+
+        emit WithdrawRemaining(timelock,bal);
+        emit Finalized(block.timestamp);
+
     }
 
     // ============ FINALIZE (UNIFIED WITH ECOSYSTEM) ============
