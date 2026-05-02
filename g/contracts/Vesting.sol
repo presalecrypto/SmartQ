@@ -116,6 +116,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
         uint256 amount
     ) external onlyRole(FUNDER_ROLE) onlyActive returns (bytes32) {
 
+        require(amount > 0, "Zero amount");
         bytes32 id = keccak256(abi.encode(pType, user, amount, proposalNonce++));
         proposals[id] = Proposal(pType, user, amount, 0, uint64(block.timestamp), false);
 
@@ -142,6 +143,7 @@ contract Vesting is AccessControl, ReentrancyGuard {
 
         require(p.createdAt != 0, "Invalid");
         require(!p.executed, "Executed");
+        require(block.timestamp <= p.createdAt + PROPOSAL_EXPIRY, "Expired");
         require(p.approvals >= threshold, "Not enough");
 
         p.executed = true;
