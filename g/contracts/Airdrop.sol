@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
@@ -12,10 +11,10 @@ contract Airdrop is AccessControl, ReentrancyGuard {
 
     // ============ ROLES ============
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
     // ============ IMMUTABLE ============
     IERC20 public immutable token;
-    address public immutable timelock;
     uint64 public immutable deployedAt;
 
     uint256 public constant GOVERNANCE_PERIOD = 180 days;
@@ -34,7 +33,7 @@ contract Airdrop is AccessControl, ReentrancyGuard {
 
     // ============ EVENTS ============
     event MerkleRootSet(bytes32 root, uint256 deadline);
-    event Claimed(address indexed user, uint256 amount);
+    event Claimed(address indexed user, uint256 amount, uint256 chainId);
     event Deactivated();
     event Finalized(uint256 timestamp);
     event WithdrawRemaining(address indexed to, uint256 amount);
@@ -46,44 +45,17 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         _;
     }
 
-    constructor(address _token, address _timelock) {
+    constructor(address _token, address _admin) {
         require(_token != address(0), "Invalid token");
-        require(_timelock != address(0), "Invalid timelock");
+        require(_admin != address(0), "Invalid admin");
 
         token = IERC20(_token);
-        timelock = _timelock;
         deployedAt = uint64(block.timestamp);
 
-        _grantRole(DEFAULT_ADMIN_ROLE, _timelock);
-        _grantRole(ADMIN_ROLE, _timelock);
-    }
-
-    // ============ ROLE SAFETY ============
-    function grantRole(bytes32 role, address account)
-        public
-        override
-        onlyActive
-    {
-        require(msg.sender == timelock, "Only timelock");
-        super.grantRole(role, account);
-    }
-
-    function revokeRole(bytes32 role, address account)
-        public
-        override
-        onlyActive
-    {
-        require(msg.sender == timelock, "Only timelock");
-        super.revokeRole(role, account);
-    }
-
-    function renounceRole(bytes32 role, address account)
-        public
-        override
-        onlyActive
-    {
-        require(msg.sender == timelock, "Only timelock");
-        super.renounceRole(role, account);
+        // 🎯 admin يمكن أن يكون Multi-sig
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        _grantRole(ADMIN_ROLE, _admin);
+        _grantRole(OPERATOR_ROLE, _admin);
     }
 
     // ============ INIT AIRDROP ============
@@ -115,10 +87,10 @@ contract Airdrop is AccessControl, ReentrancyGuard {
 
         uint256 bal = token.balanceOf(address(this));
         if (bal > 0) {
-        token.transfer(timelock, bal);
-    }
+            token.safeTransfer(msg.sender, bal);
+        }
+
         emit Deactivated();
-    
     }
 
     // ============ CLAIM ============
@@ -131,19 +103,21 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         require(block.timestamp <= deadline, "Expired");
         require(!hasClaimed[msg.sender], "Already claimed");
 
-        bytes32 leaf = keccak256(abi.encodePacked(msg.sender, amount));
+        bytes32 leaf = keccak256(
+            abi.encodePacked(msg.sender, amount, block.chainid)
+        );
 
         require(
             MerkleProof.verify(proof, merkleRoot, leaf),
             "Invalid proof"
         );
 
-        token.safeTransfer(msg.sender, amount);
         hasClaimed[msg.sender] = true;
         totalClaimed += amount;
 
+        token.safeTransfer(msg.sender, amount);
 
-        emit Claimed(msg.sender, amount);
+        emit Claimed(msg.sender, amount, block.chainid);
     }
 
     // ============ WITHDRAW ============
@@ -157,39 +131,44 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         uint256 bal = token.balanceOf(address(this));
         require(bal > 0, "Nothing left");
 
-        token.transfer(timelock, bal);
+        token.safeTransfer(msg.sender, bal);
+
         finalized = true;
 
-        _revokeRole(ADMIN_ROLE, timelock);
-        _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
-        _setRoleAdmin(ADMIN_ROLE, bytes32(0));
-        _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
+        _lockRoles();
 
-        emit WithdrawRemaining(timelock,bal);
+        emit WithdrawRemaining(msg.sender, bal);
         emit Finalized(block.timestamp);
-
     }
 
-    // ============ FINALIZE (UNIFIED WITH ECOSYSTEM) ============
+    // ============ FINALIZE ============
     function finalize()
         external
         onlyRole(ADMIN_ROLE)
         onlyActive
     {
+        // 🔥 حماية الحوكمة لمدة 180 يوم
         if (block.timestamp < deployedAt + GOVERNANCE_PERIOD) {
-            require(msg.sender == timelock, "Only timelock in governance");
+            require(
+                hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+                "Governance restricted"
+            );
         }
 
         finalized = true;
 
-        // revoke roles (same pattern as Token.sol + Vesting.sol)
-        _revokeRole(ADMIN_ROLE, timelock);
-        _revokeRole(DEFAULT_ADMIN_ROLE, timelock);
+        _lockRoles();
+
+        emit Finalized(block.timestamp);
+    }
+
+    // ============ INTERNAL ============
+    function _lockRoles() internal {
+        _revokeRole(ADMIN_ROLE, msg.sender);
+        _revokeRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         _setRoleAdmin(ADMIN_ROLE, bytes32(0));
         _setRoleAdmin(DEFAULT_ADMIN_ROLE, bytes32(0));
-
-        emit Finalized(block.timestamp);
     }
 
     // ============ VIEW ============
@@ -223,10 +202,8 @@ contract Airdrop is AccessControl, ReentrancyGuard {
         remaining = token.balanceOf(address(this));
         claimed = totalClaimed;
 
-        if (block.timestamp >= deadline) {
-            timeLeft = 0;
-        } else {
-            timeLeft = deadline - block.timestamp;
-        }
+        timeLeft = block.timestamp >= deadline
+            ? 0
+            : deadline - block.timestamp;
     }
 }

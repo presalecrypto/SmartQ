@@ -78,7 +78,6 @@ contract ProjectToken is ERC20, ERC20Burnable, AccessControl, ReentrancyGuard {
         
         for (uint256 i = 0; i < recipients.length; i++) {
             require(recipients[i] != address(0), "Zero address");
-            require(recipients[i].code.length == 0, "No contracts");
 
             totalMinted += amounts[i];
             _mint(recipients[i], amounts[i]);
